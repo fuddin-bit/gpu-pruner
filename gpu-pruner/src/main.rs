@@ -1,5 +1,7 @@
 use minijinja::{Environment, context};
 
+mod dashboard;
+
 #[cfg(feature = "otel")]
 use std::sync::LazyLock;
 #[cfg(feature = "otel")]
@@ -116,6 +118,10 @@ struct Cli {
     /// Log format to use
     #[clap(short, long, default_value = "default")]
     log_format: LogFormat,
+
+    /// Enable the web dashboard on the specified port
+    #[clap(long)]
+    dashboard_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, ValueEnum, Default, Serialize)]
@@ -283,8 +289,14 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ScaleKind>(100);
 
+    // Initialize dashboard state if dashboard is enabled
+    let dashboard_state = std::sync::Arc::new(tokio::sync::RwLock::new(
+        dashboard::DashboardState::default(),
+    ));
+
     let query_task = {
         let args = args.clone();
+        let dashboard_state = dashboard_state.clone();
         tokio::spawn(async move {
             let mut interval =
                 time::interval(tokio::time::Duration::from_secs(args.check_interval));
@@ -294,7 +306,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let client = build_prom_client(&args).await;
-                match run_query_and_scale(client, query.clone(), &args, tx.clone()).await {
+                match run_query_and_scale(client, query.clone(), &args, tx.clone(), dashboard_state.clone()).await {
                     Ok(qr) => {
                         QUERY_FAILURES.store(0, std::sync::atomic::Ordering::Relaxed);
                         tracing::info!(monotonic_counter.query_successes = 1, "Query succeeded");
@@ -366,10 +378,29 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    _ = tokio::try_join! {
-        query_task,
-        scale_down_task
-    }?;
+    // Start dashboard server if requested
+    let dashboard_task = if let Some(port) = args.dashboard_port {
+        let dashboard_state = dashboard_state.clone();
+        Some(tokio::spawn(async move {
+            dashboard::run_server(dashboard_state, port).await
+        }))
+    } else {
+        None
+    };
+
+    // Wait for all tasks
+    if let Some(dashboard_task) = dashboard_task {
+        _ = tokio::try_join! {
+            query_task,
+            scale_down_task,
+            dashboard_task
+        }?;
+    } else {
+        _ = tokio::try_join! {
+            query_task,
+            scale_down_task
+        }?;
+    }
 
     Ok(())
 }
@@ -393,6 +424,7 @@ async fn run_query_and_scale(
     query: String,
     args: &Cli,
     tx: Sender<ScaleKind>,
+    dashboard_state: dashboard::SharedDashboardState,
 ) -> anyhow::Result<QueryResponse> {
     let response = match client.query(query).get().await {
         Ok(response) => response,
@@ -534,6 +566,14 @@ async fn run_query_and_scale(
     let shutdown_events: HashSet<ScaleKind> = results.into_iter().flatten().collect();
 
     let num_shutdown_events = shutdown_events.len();
+
+    // Update dashboard state
+    dashboard::update_dashboard_state(
+        dashboard_state,
+        shutdown_events.iter().cloned().collect(),
+        num_pods,
+    )
+    .await;
 
     futures::stream::iter(shutdown_events)
         .filter_map(|obj| async {

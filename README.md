@@ -16,6 +16,22 @@ The background for `gpu-pruner` is that in certain environments it is very easy 
 
 This culler politely pauses workloads that appear idle by scaling them down to 0 replicas. Features may be added in the future for better notifications, but the idea is that a user can simply re-enable the workload when they are ready to test/demo again.
 
+## Dashboard
+
+The gpu-pruner now includes a web dashboard for monitoring GPU workloads in real-time. See [DASHBOARD.md](DASHBOARD.md) for setup instructions.
+
+Features:
+- Real-time monitoring of idle GPU workloads
+- Resource usage statistics
+- Modern web UI with auto-refresh
+- REST API endpoint for programmatic access
+
+Enable the dashboard by passing `--dashboard-port`:
+
+```sh
+gpu-pruner --dashboard-port=8080 -d --prometheus-url=...
+```
+
 ## usage 
 
 ```sh
@@ -70,6 +86,9 @@ Options:
 
           [default: default]
           [possible values: json, default, pretty]
+
+      --dashboard-port <DASHBOARD_PORT>
+          Enable the web dashboard on the specified port
 
   -h, --help
           Print help (see a summary with '-h')

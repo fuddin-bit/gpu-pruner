@@ -22,11 +22,16 @@ spec:
             - '-d'
             - '--run-mode=scale-down'
             - '--prometheus-url=http://thanos-querier.openshift-monitoring.svc.cluster.local'
+            - '--dashboard-port=8080'
           env:
             - name: RUST_BACKTRACE
               value: '1'
             - name: RUST_LOG
               value: info
+          ports:
+            - containerPort: 8080
+              name: dashboard
+              protocol: TCP
           resources:
             limits:
               cpu: 500m
