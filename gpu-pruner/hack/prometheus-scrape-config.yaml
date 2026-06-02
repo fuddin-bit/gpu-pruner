@@ -1,0 +1,134 @@
+# Example Prometheus scrape configurations for GPU monitoring infrastructure
+#
+# This file documents how to configure Prometheus to scrape the metrics that
+# gpu-pruner consumes (DCGM exporter and kube-state-metrics).
+#
+# Note: These are likely already configured in your cluster if gpu-pruner is working,
+# but this serves as a reference for new deployments.
+
+---
+# ServiceMonitor for NVIDIA DCGM Exporter
+# The DCGM exporter typically runs as a DaemonSet on GPU nodes
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nvidia-dcgm-exporter
+  namespace: gpu-operator  # or wherever DCGM exporter is deployed
+  labels:
+    app: nvidia-dcgm-exporter
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  endpoints:
+    - port: metrics  # typically port 9400
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      # Optional: relabeling to ensure pod/namespace labels are preserved
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: kubernetes_namespace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: kubernetes_pod_name
+
+---
+# ServiceMonitor for kube-state-metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-state-metrics
+  namespace: kube-system  # or monitoring namespace
+  labels:
+    app: kube-state-metrics
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  endpoints:
+    - port: http-metrics  # typically port 8080
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+
+---
+# Alternative: PodMonitor for DCGM (if no Service exists)
+# Use this if DCGM exporter DaemonSet doesn't have a Service
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: nvidia-dcgm-exporter
+  namespace: gpu-operator
+  labels:
+    app: nvidia-dcgm-exporter
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+
+---
+# Example Prometheus scrape config (if using prometheus.yml instead of ServiceMonitor)
+# This goes in the Prometheus ConfigMap
+#
+# scrape_configs:
+#   - job_name: 'dcgm-exporter'
+#     kubernetes_sd_configs:
+#       - role: pod
+#         namespaces:
+#           names:
+#             - gpu-operator
+#     relabel_configs:
+#       - source_labels: [__meta_kubernetes_pod_label_app]
+#         action: keep
+#         regex: nvidia-dcgm-exporter
+#       - source_labels: [__meta_kubernetes_pod_container_port_name]
+#         action: keep
+#         regex: metrics
+#       - source_labels: [__meta_kubernetes_pod_node_name]
+#         target_label: node
+#       - source_labels: [__meta_kubernetes_namespace]
+#         target_label: kubernetes_namespace
+#       - source_labels: [__meta_kubernetes_pod_name]
+#         target_label: kubernetes_pod_name
+#
+#   - job_name: 'kube-state-metrics'
+#     kubernetes_sd_configs:
+#       - role: service
+#         namespaces:
+#           names:
+#             - kube-system
+#     relabel_configs:
+#       - source_labels: [__meta_kubernetes_service_name]
+#         action: keep
+#         regex: kube-state-metrics
+#       - source_labels: [__meta_kubernetes_service_port_name]
+#         action: keep
+#         regex: http-metrics
+
+---
+# Notes:
+#
+# 1. DCGM Exporter typically exposes these key metrics:
+#    - DCGM_FI_PROF_GR_ENGINE_ACTIVE (primary idle detection metric)
+#    - DCGM_FI_DEV_GPU_UTIL (fallback utilization metric)
+#    - DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL (memory metrics)
+#    - DCGM_FI_DEV_POWER_USAGE (power draw)
+#
+# 2. kube-state-metrics provides:
+#    - kube_pod_container_resource_requests{resource="nvidia_com_gpu"}
+#
+# 3. Verify scraping is working:
+#    kubectl port-forward -n <prometheus-namespace> svc/prometheus-k8s 9090:9090
+#    Open http://localhost:9090/targets
+#    Look for dcgm-exporter and kube-state-metrics targets showing as UP
+#
+# 4. Test queries in Prometheus:
+#    count(DCGM_FI_DEV_GPU_UTIL)  # Should return total GPU count
+#    count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) == 0)  # Idle GPUs

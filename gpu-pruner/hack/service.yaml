@@ -10,7 +10,7 @@ spec:
   selector:
     app: gpu-pruner
   ports:
-    - name: dashboard
+    - name: http
       protocol: TCP
       port: 8080
       targetPort: 8080

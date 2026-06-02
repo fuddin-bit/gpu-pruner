@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::{Meta, ScaleKind};
+use gpu_pruner::{metrics, Meta, ScaleKind};
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct WorkloadInfo {
@@ -56,11 +56,17 @@ pub async fn update_dashboard_state(
         })
         .collect();
 
+    let idle_count = idle_workloads.len();
+
     let mut state = state.write().await;
     state.idle_workloads = workloads;
-    state.total_idle_gpus = idle_workloads.len();
+    state.total_idle_gpus = idle_count;
     state.total_pods_checked = total_pods;
     state.last_update = chrono::Utc::now().to_rfc3339();
+
+    // Update Prometheus gauges
+    metrics::IDLE_GPUS.set(idle_count as i64);
+    metrics::PODS_CHECKED.set(total_pods as i64);
 }
 
 async fn dashboard_html() -> impl IntoResponse {
@@ -72,10 +78,15 @@ async fn api_status(State(state): State<SharedDashboardState>) -> impl IntoRespo
     Json(state.clone())
 }
 
+async fn metrics_handler() -> impl IntoResponse {
+    metrics::render()
+}
+
 pub fn create_router(state: SharedDashboardState) -> Router {
     Router::new()
         .route("/", get(dashboard_html))
         .route("/api/status", get(api_status))
+        .route("/metrics", get(metrics_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

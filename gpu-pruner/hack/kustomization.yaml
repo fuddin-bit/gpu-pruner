@@ -5,3 +5,4 @@ resources:
 - clusterrole.yaml
 - service.yaml
 - route.yaml
+- servicemonitor.yaml

@@ -280,6 +280,10 @@ impl Drop for OtelGuard {
 async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     let _guard = setup_logging(&args);
+
+    // Initialize Prometheus metrics registry
+    gpu_pruner::metrics::init();
+
     let enabled_resources = get_enabled_resources(&args.enabled_resources);
     tracing::info!("Enabled resources: {enabled_resources:?}");
 
@@ -309,6 +313,9 @@ async fn main() -> anyhow::Result<()> {
                 match run_query_and_scale(client, query.clone(), &args, tx.clone(), dashboard_state.clone()).await {
                     Ok(qr) => {
                         QUERY_FAILURES.store(0, std::sync::atomic::Ordering::Relaxed);
+                        gpu_pruner::metrics::QUERY_SUCCESSES.inc();
+                        gpu_pruner::metrics::QUERY_CANDIDATES.inc_by(qr.num_pods as u64);
+                        gpu_pruner::metrics::QUERY_SHUTDOWN_EVENTS.inc_by(qr.shutdown_events as u64);
                         tracing::info!(monotonic_counter.query_successes = 1, "Query succeeded");
                         tracing::info!(
                             counter.query_returned_candidates = qr.num_pods,
@@ -322,6 +329,7 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => {
                         let failures =
                             QUERY_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        gpu_pruner::metrics::QUERY_FAILURES.inc();
                         tracing::error!(
                             monotonic_counter.query_failures = 1,
                             "Failed to run query and scale down: {e}"
@@ -357,6 +365,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             if let Err(e) = sk.scale(kube_client.clone()).await {
+                gpu_pruner::metrics::SCALE_FAILURES.inc();
                 tracing::error!(
                     monotonic_counter.scale_failures = 1,
                     "Failed to scale resource! {e}"
@@ -368,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
             let name = sk.name();
             let namespace = sk.namespace().unwrap_or_else(|| "default".to_string());
 
+            gpu_pruner::metrics::SCALE_SUCCESSES.inc();
             tracing::info!(
                 monotonic_counter.scale_successes = 1,
                 "Scaled Resource: [{kind}] - {namespace}:{name}",
