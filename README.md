@@ -18,7 +18,11 @@ This culler politely pauses workloads that appear idle by scaling them down to 0
 
 ## Dashboard
 
-The gpu-pruner now includes a web dashboard for monitoring GPU workloads in real-time. See [DASHBOARD.md](DASHBOARD.md) for setup instructions.
+The gpu-pruner includes both a **web dashboard** and a **Grafana dashboard** for monitoring GPU workloads.
+
+### Web Dashboard
+
+Real-time web interface for monitoring GPU workloads. See [DASHBOARD.md](DASHBOARD.md) for setup instructions.
 
 Features:
 - Real-time monitoring of idle GPU workloads
@@ -31,6 +35,18 @@ Enable the dashboard by passing `--dashboard-port`:
 ```sh
 gpu-pruner --dashboard-port=8080 -d --prometheus-url=...
 ```
+
+### Grafana Dashboard
+
+Import `gpu-dashboard.json` into Grafana for advanced analytics and visualization:
+
+- **Cluster GPU Overview**: Total GPUs; VRAM and engine-activity partitions (each pair sums to total)
+- **GPU Utilization Heatmap**: GPU utilization per node over time
+- **Idle GPU Workloads**: GPUs with zero compute activity for 30+ minutes
+- **Idle GPU Time by Deployment**: Identify which deployments are wasting the most GPU allocation time ([see guide](IDLE_GPU_QUERY.md))
+- **GPU Allocation Leaderboard**: Total GPU requests per namespace
+
+See [DASHBOARD.md](DASHBOARD.md) for import instructions and [IDLE_GPU_QUERY.md](IDLE_GPU_QUERY.md) for querying idle GPU time by deployment.
 
 ## usage 
 

@@ -86,6 +86,123 @@ The dashboard displays:
    - Workload name
    - Resource type (Deployment, StatefulSet, etc.)
 
+## Grafana Dashboard
+
+A Grafana dashboard is included in `gpu-dashboard.json` for more detailed GPU monitoring and analytics. Import it into your Grafana instance to visualize:
+
+- **Cluster GPU Overview**: Total GPUs; VRAM partition (FB>0 + FB=0 = Total); engine partition (idle 30m + active 30m = Total)
+- **GPU Utilization Heatmap**: GPU utilization per node over time
+- **Running GPU Workloads**: All pods with GPU requests
+- **Idle GPU Workloads**: GPUs with zero compute activity for 30+ minutes
+- **Idle GPU Time by Deployment**: Deployments producing the most allocated GPU idle time (see [Prometheus Queries](#prometheus-queries) below)
+- **GPU Allocation Leaderboard**: Total GPU requests per namespace
+
+### Importing the Grafana Dashboard
+
+1. Open Grafana and navigate to Dashboards → Import
+2. Upload `gpu-dashboard.json` or copy-paste its contents
+3. Select your Prometheus datasource
+4. Click "Import"
+
+The dashboard requires:
+- Prometheus datasource with DCGM exporter metrics
+- kube-state-metrics for pod resource information
+- For deployment-level idle time analysis: kube-state-metrics with pod label metrics enabled
+
+## Using Dashboard Queries in Prometheus
+
+All queries used in the Grafana dashboard can be extracted and run directly in Prometheus for ad-hoc analysis.
+
+### Extracting Queries from the Dashboard
+
+To extract a query from `gpu-dashboard.json`:
+
+```bash
+# Extract the "Idle GPU Time by Deployment" query
+jq -r '.panels[] | select(.title == "Idle GPU Time by Deployment (30m)") | .targets[0].expr' gpu-dashboard.json
+
+# Extract all queries with their panel titles
+jq -r '.panels[] | select(.targets) | "\(.title):\n\(.targets[0].expr)\n"' gpu-dashboard.json
+```
+
+### Cluster GPU overview partitions
+
+The overview row uses **two independent partitions** of the same total. Each pair sums to **Total GPUs**; VRAM and engine counts are not opposites of each other (a GPU can have VRAM allocated while engine-idle).
+
+| Panel | PromQL |
+|-------|--------|
+| Total GPUs | `count(DCGM_FI_DEV_GPU_UTIL)` |
+| VRAM allocated (FB>0) | `count(DCGM_FI_DEV_FB_USED > 0)` |
+| VRAM free (FB=0) | `count(DCGM_FI_DEV_FB_USED == 0)` |
+| Engine idle (30m) | `count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) == 0)` |
+| Engine active (30m) | `count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) > 0)` |
+
+Equivalently: **Engine active** = Total − Engine idle, and **VRAM free** = Total − VRAM allocated, when the same DCGM time series are counted.
+
+### Idle GPU Time by Deployment Query
+
+This query identifies which Kubernetes Deployments are producing the most allocated GPU idle time while GPU utilization is at 0%.
+
+**What it measures:**
+- Idle GPU-hours per deployment over a 30-minute window
+- Deployments are sorted by total idle time (worst offenders first)
+
+**How it works:**
+1. Detects GPUs with 0% utilization over 30 minutes using DCGM metrics (`DCGM_FI_PROF_GR_ENGINE_ACTIVE` or fallback to `DCGM_FI_DEV_GPU_UTIL`)
+2. Counts idle GPUs per pod (multi-GPU pods contribute multiple GPUs)
+3. Joins with `kube_pod_labels` to extract deployment name from pod `app` label
+4. Aggregates by deployment and calculates idle GPU-hours (GPU count × 0.5 hours)
+5. Sorts descending to show worst offenders first
+
+**To run in Prometheus:**
+
+1. Port-forward to Prometheus:
+   ```bash
+   kubectl port-forward -n <prometheus-namespace> svc/prometheus 9090:9090
+   ```
+
+2. Extract and copy the query:
+   ```bash
+   jq -r '.panels[] | select(.title == "Idle GPU Time by Deployment (30m)") | .targets[0].expr' gpu-dashboard.json
+   ```
+
+3. Paste into Prometheus UI at http://localhost:9090 and click "Execute"
+
+**Example output:**
+
+| label_app (Deployment) | namespace     | Value (Idle GPU-Hours) |
+|------------------------|---------------|------------------------|
+| llama-70b-inference    | ml-team       | 12.5                   |
+| stable-diffusion       | ml-team       | 8.0                    |
+| jupyter-notebook       | data-science  | 4.5                    |
+
+**Prerequisites:**
+- DCGM exporter running on GPU nodes
+- kube-state-metrics with pod label metrics enabled (`--metric-labels-allowlist=pods=[*]`)
+- Pods labeled with `app=<deployment-name>` (standard Kubernetes convention)
+
+**Limitations:**
+- Requires `kube_pod_labels` metric from kube-state-metrics
+- Depends on pods having the `app` label set to the deployment name
+- Does not traverse ReplicaSet ownership (relies on label convention)
+- Only tracks Deployments (not StatefulSets, InferenceServices, etc.)
+- 30-minute window is fixed in this query
+
+**Fallback query** (if `kube_pod_labels` is unavailable):
+```promql
+sort_desc(
+  sum by (exported_pod, exported_namespace) (
+    (
+      max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_pod != ""}[30m])
+      or
+      max_over_time(DCGM_FI_DEV_GPU_UTIL{exported_pod != ""}[30m]) / 100
+    ) == 0
+  ) * 0.5
+)
+```
+
+This shows idle GPU-hours by pod name instead. Deployment names can be manually inferred from pod name prefixes (e.g., `llama-inference-7b56f9-abc` → deployment `llama-inference`).
+
 ## API Endpoint
 
 The dashboard also exposes a REST API endpoint for programmatic access:
