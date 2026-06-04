@@ -1,0 +1,151 @@
+# Grafana Helm Chart Values for OpenShift
+#
+# OpenShift-specific configuration with Route and token-based Prometheus auth
+#
+# Usage:
+#   helm install gpu-grafana grafana/grafana \
+#     -f helm/grafana-values.yaml \
+#     -f helm/grafana-values-openshift.yaml \
+#     -n monitoring --create-namespace
+
+# Override Prometheus datasource for OpenShift monitoring
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        # OpenShift uses Thanos Querier as the query frontend
+        url: http://thanos-querier.openshift-monitoring.svc.cluster.local:9090
+        access: proxy
+        isDefault: true
+        uid: PBFA97CFB590B2093
+        editable: true
+        jsonData:
+          timeInterval: 30s
+          queryTimeout: 60s
+          httpMethod: POST
+          # Token authentication for OpenShift monitoring
+          httpHeaderName1: 'Authorization'
+        # IMPORTANT: Set this token via --set or use a secret
+        # To get a token:
+        #   oc serviceaccounts get-token grafana -n monitoring
+        # secureJsonData:
+        #   httpHeaderValue1: 'Bearer YOUR_OPENSHIFT_TOKEN_HERE'
+
+# Service account with additional OpenShift annotations
+serviceAccount:
+  create: true
+  name: grafana
+  annotations:
+    serviceaccounts.openshift.io/oauth-redirectreference.grafana: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"grafana"}}'
+
+# RBAC with cluster-monitoring-view for Prometheus access
+rbac:
+  create: true
+  pspEnabled: false
+  extraClusterRoleRules:
+    - apiGroups:
+        - ""
+      resources:
+        - configmaps
+      verbs:
+        - get
+        - list
+        - watch
+
+# Additional ClusterRoleBinding for monitoring access
+# Note: This requires creating the binding separately:
+#   oc adm policy add-cluster-role-to-user cluster-monitoring-view -z grafana -n monitoring
+# Or apply this separately:
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRoleBinding
+# metadata:
+#   name: grafana-cluster-monitoring-view
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: ClusterRole
+#   name: cluster-monitoring-view
+# subjects:
+# - kind: ServiceAccount
+#   name: grafana
+#   namespace: monitoring
+
+# OpenShift Route configuration (instead of Ingress)
+route:
+  enabled: true
+  host: grafana-gpu.apps.example.com  # Update to match your OpenShift cluster domain
+  tls:
+    enabled: true
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  annotations:
+    haproxy.router.openshift.io/timeout: 4m
+    haproxy.router.openshift.io/cookie_name: grafana-session
+
+# Disable standard Ingress
+ingress:
+  enabled: false
+
+# OpenShift-compatible security context
+securityContext:
+  runAsNonRoot: true
+  # OpenShift assigns UIDs dynamically from project range
+  # runAsUser: 472
+  # fsGroup: 472
+
+# Pod security context for OpenShift
+podSecurityContext:
+  runAsNonRoot: true
+
+# Environment variables for OpenShift
+env:
+  GF_SECURITY_ADMIN_PASSWORD__FILE: /etc/secrets/admin-password
+  GF_SERVER_ROOT_URL: https://grafana-gpu.apps.example.com
+  GF_SERVER_DOMAIN: grafana-gpu.apps.example.com
+  GF_ANALYTICS_REPORTING_ENABLED: "false"
+  GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+  # Optional: Enable OAuth proxy for OpenShift SSO
+  # GF_AUTH_PROXY_ENABLED: "true"
+  # GF_AUTH_PROXY_HEADER_NAME: "X-Forwarded-User"
+  # GF_AUTH_PROXY_AUTO_SIGN_UP: "true"
+
+# Grafana configuration for OpenShift
+grafana.ini:
+  server:
+    domain: grafana-gpu.apps.example.com
+    root_url: https://grafana-gpu.apps.example.com
+    serve_from_sub_path: false
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+  log:
+    mode: console
+    level: info
+  security:
+    admin_user: admin
+  dashboards:
+    default_home_dashboard_path: /var/lib/grafana/dashboards/gpu-pruner/gpu-dashboard.json
+
+# Note: If you need to deploy a Route manually, use this YAML:
+# ---
+# apiVersion: route.openshift.io/v1
+# kind: Route
+# metadata:
+#   name: grafana
+#   namespace: monitoring
+#   annotations:
+#     haproxy.router.openshift.io/timeout: 4m
+# spec:
+#   host: grafana-gpu.apps.example.com
+#   to:
+#     kind: Service
+#     name: gpu-grafana
+#     weight: 100
+#   port:
+#     targetPort: 3000
+#   tls:
+#     termination: edge
+#     insecureEdgeTerminationPolicy: Redirect
+#   wildcardPolicy: None

@@ -48,6 +48,25 @@ Import `gpu-dashboard.json` into Grafana for advanced analytics and visualizatio
 
 See [DASHBOARD.md](DASHBOARD.md) for import instructions and [IDLE_GPU_QUERY.md](IDLE_GPU_QUERY.md) for querying idle GPU time by deployment.
 
+#### Deploy Grafana with Helm
+
+For a complete standalone Grafana deployment with the GPU dashboard pre-configured:
+
+```bash
+# Add Grafana Helm repository
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+# Install Grafana with GPU dashboard
+helm install gpu-grafana grafana/grafana \
+  -f helm/grafana-values.yaml \
+  --set adminPassword='YOUR_SECURE_PASSWORD' \
+  --set datasources."datasources\.yaml".datasources[0].url='http://prometheus-k8s.monitoring.svc.cluster.local:9090' \
+  -n monitoring --create-namespace
+```
+
+See [GRAFANA_DEPLOYMENT.md](GRAFANA_DEPLOYMENT.md) for complete deployment instructions, configuration options, and troubleshooting.
+
 ## usage 
 
 ```sh
