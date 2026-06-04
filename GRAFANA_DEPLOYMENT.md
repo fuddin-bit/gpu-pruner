@@ -412,6 +412,7 @@ Check each panel shows data (not "No data"):
 | Peak power | `max(DCGM_FI_DEV_POWER_USAGE)` | Max per-GPU watts |
 | XID errors | `sum(DCGM_FI_DEV_XID_ERRORS)` | Should be 0 in healthy clusters |
 | VRAM utilization % | `100 * avg by (Hostname, gpu) (DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL)` | Per-GPU VRAM fill |
+| Graphics/compute engine active | `avg by (Hostname) (DCGM_FI_PROF_GR_ENGINE_ACTIVE)` | 0–1; primary idle-detection metric |
 | SM active (profiling) | `avg by (Hostname) (DCGM_FI_PROF_SM_ACTIVE)` | No data if profiling disabled |
 
 ### 6. Test Prometheus Queries Manually

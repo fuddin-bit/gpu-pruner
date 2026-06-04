@@ -683,10 +683,36 @@ data:
           }
         },
         {
+          "title": "Graphics/compute engine active by node",
+          "description": "Average graphics/compute engine activity (DCGM_FI_PROF_GR_ENGINE_ACTIVE, 0–1). Primary metric for idle detection in gpu-pruner and engine idle/active overview stats.",
+          "type": "timeseries",
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 99 },
+          "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
+          "targets": [
+            {
+              "expr": "avg by (Hostname) (DCGM_FI_PROF_GR_ENGINE_ACTIVE)",
+              "legendFormat": "{{Hostname}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 2,
+                "fillOpacity": 15,
+                "spanNulls": true
+              }
+            }
+          }
+        },
+        {
           "title": "SM active by node",
           "description": "DCGM profiling: streaming multiprocessor activity (DCGM_FI_PROF_SM_ACTIVE). No data if DCGM profiling is not enabled on the exporter.",
           "type": "timeseries",
-          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 99 },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 105 },
           "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
           "targets": [
             {
@@ -712,7 +738,7 @@ data:
           "title": "Tensor pipe active by node",
           "description": "DCGM profiling: tensor pipe activity (DCGM_FI_PROF_PIPE_TENSOR_ACTIVE). No data if DCGM profiling is not enabled.",
           "type": "timeseries",
-          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 99 },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 105 },
           "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
           "targets": [
             {
@@ -738,7 +764,7 @@ data:
           "title": "DRAM active by node",
           "description": "DCGM profiling: DRAM activity (DCGM_FI_PROF_DRAM_ACTIVE). No data if DCGM profiling is not enabled.",
           "type": "timeseries",
-          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 99 },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 105 },
           "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
           "targets": [
             {
@@ -769,5 +795,5 @@ data:
       "timezone": "browser",
       "title": "Waldorf GPU Usage & Idle Tracker",
       "uid": "prometheus",
-      "version": 2
+      "version": 3
     }

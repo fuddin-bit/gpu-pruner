@@ -153,6 +153,7 @@ Panels in the **GPU Health & DCGM** row use additional dcgm-exporter counters. P
 | Power draw by node | `sum by (Hostname) (DCGM_FI_DEV_POWER_USAGE)` |
 | VRAM utilization % | `100 * avg by (Hostname, gpu) (DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL)` |
 | Memory copy utilization | `avg by (Hostname) (DCGM_FI_DEV_MEM_COPY_UTIL)` |
+| Graphics/compute engine active by node | `avg by (Hostname) (DCGM_FI_PROF_GR_ENGINE_ACTIVE)` |
 | XID errors (1h increase) | `sum by (Hostname, gpu) (increase(DCGM_FI_DEV_XID_ERRORS[1h]))` |
 | SM active by node | `avg by (Hostname) (DCGM_FI_PROF_SM_ACTIVE)` |
 | Tensor pipe active by node | `avg by (Hostname) (DCGM_FI_PROF_PIPE_TENSOR_ACTIVE)` |
