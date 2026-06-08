@@ -34,8 +34,8 @@ use kube::{Api, Client as KubeClient, Resource};
 use clap::{Parser, ValueEnum};
 
 use gpu_pruner::{
-    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, find_root_object,
-    get_enabled_resources, get_prom_client, get_prometheus_token,
+    Meta, PodMetricData, QueryResponse, RootObjectError, ScaleKind, Scaler, TlsMode,
+    find_root_object, get_enabled_resources, get_prom_client, get_prometheus_token,
 };
 
 /// `gpu-pruner` is a tool to prune idle pods based on GPU utilization. It uses Prometheus to query
@@ -516,6 +516,14 @@ async fn run_query_and_scale(
                 );
                 match find_root_object(kube_client.clone(), pod.meta()).await {
                     Ok(obj) => Some(obj),
+                    Err(e @ RootObjectError::NonScalable { .. }) => {
+                        tracing::debug!(
+                            "Skipping {ns}:{name}, {e}",
+                            ns = &pmd.namespace,
+                            name = &pmd.name,
+                        );
+                        None
+                    }
                     Err(e) => {
                         tracing::warn!(
                             "Skipping {ns}:{name}, no scalable root object: {e}",
