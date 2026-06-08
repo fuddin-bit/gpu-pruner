@@ -94,7 +94,8 @@ data:
           "targets": [
             {
               "expr": "count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) == 0)",
-              "legendFormat": "Idle"
+              "legendFormat": "Idle (30m)",
+              "refId": "Idle (30m)"
             }
           ],
           "fieldConfig": {
@@ -114,7 +115,8 @@ data:
           "targets": [
             {
               "expr": "count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) > 0)",
-              "legendFormat": "Active"
+              "legendFormat": "Active (30m)",
+              "refId": "Active (30m)"
             }
           ],
           "fieldConfig": {
@@ -245,7 +247,8 @@ data:
               "expr": "max by (Hostname, gpu, modelName) (max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m])) == 0",
               "legendFormat": "",
               "format": "table",
-              "instant": true
+              "instant": true,
+              "refId": "Idle GPUs (30m)"
             }
           ],
           "transformations": [
@@ -278,8 +281,9 @@ data:
           "targets": [
             {
               "expr": "(label_replace(sum by (label_app, namespace) (count by (pod, namespace) (label_replace(label_replace((max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{pod != \"\", namespace!~\"cw-.*\"}[30m]) or max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_pod != \"\", namespace!~\"cw-.*\"}[30m]) or max_over_time(DCGM_FI_DEV_GPU_UTIL{pod != \"\", namespace!~\"cw-.*\"}[30m]) / 100 or max_over_time(DCGM_FI_DEV_GPU_UTIL{exported_pod != \"\", namespace!~\"cw-.*\"}[30m]) / 100) == bool 0, \"pod\", \"$1\", \"exported_pod\", \"(.+)\"), \"namespace\", \"$1\", \"exported_namespace\", \"(.+)\") ) * on (pod, namespace) group_left(label_app) kube_pod_labels{label_app != \"\"}), \"deployment\", \"$1\", \"label_app\", \"(.+)\") or sum by (deployment, namespace) (label_replace(count by (pod, namespace) (label_replace(label_replace((max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{pod != \"\", namespace!~\"cw-.*\"}[30m]) or max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_pod != \"\", namespace!~\"cw-.*\"}[30m]) or max_over_time(DCGM_FI_DEV_GPU_UTIL{pod != \"\", namespace!~\"cw-.*\"}[30m]) / 100 or max_over_time(DCGM_FI_DEV_GPU_UTIL{exported_pod != \"\", namespace!~\"cw-.*\"}[30m]) / 100) == bool 0, \"pod\", \"$1\", \"exported_pod\", \"(.+)\"), \"namespace\", \"$1\", \"exported_namespace\", \"(.+)\")), \"deployment\", \"$1\", \"pod\", \"^(.*)-[^-]+-[^-]+$\"))) * 0.5",
-              "legendFormat": "{{deployment}} ({{namespace}})",
-              "interval": "1m"
+              "legendFormat": "{{deployment}} ({{namespace}}) (30m)",
+              "interval": "1m",
+              "refId": "By deployment (30m)"
             }
           ],
           "fieldConfig": {
@@ -334,7 +338,8 @@ data:
               "expr": "sort_desc((label_replace(sum by (label_app, namespace) (count by (pod, namespace) (label_replace(label_replace((max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{pod != \"\", namespace!~\"cw-.*\"}[30m]) or max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_pod != \"\", namespace!~\"cw-.*\"}[30m]) or max_over_time(DCGM_FI_DEV_GPU_UTIL{pod != \"\", namespace!~\"cw-.*\"}[30m]) / 100 or max_over_time(DCGM_FI_DEV_GPU_UTIL{exported_pod != \"\", namespace!~\"cw-.*\"}[30m]) / 100) == bool 0, \"pod\", \"$1\", \"exported_pod\", \"(.+)\"), \"namespace\", \"$1\", \"exported_namespace\", \"(.+)\") ) * on (pod, namespace) group_left(label_app) kube_pod_labels{label_app != \"\"}), \"deployment\", \"$1\", \"label_app\", \"(.+)\") or sum by (deployment, namespace) (label_replace(count by (pod, namespace) (label_replace(label_replace((max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{pod != \"\", namespace!~\"cw-.*\"}[30m]) or max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_pod != \"\", namespace!~\"cw-.*\"}[30m]) or max_over_time(DCGM_FI_DEV_GPU_UTIL{pod != \"\", namespace!~\"cw-.*\"}[30m]) / 100 or max_over_time(DCGM_FI_DEV_GPU_UTIL{exported_pod != \"\", namespace!~\"cw-.*\"}[30m]) / 100) == bool 0, \"pod\", \"$1\", \"exported_pod\", \"(.+)\"), \"namespace\", \"$1\", \"exported_namespace\", \"(.+)\")), \"deployment\", \"$1\", \"pod\", \"^(.*)-[^-]+-[^-]+$\"))) * 0.5)",
               "legendFormat": "",
               "format": "table",
-              "instant": true
+              "instant": true,
+              "refId": "By deployment (30m)"
             }
           ],
           "transformations": [
