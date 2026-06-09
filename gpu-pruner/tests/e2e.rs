@@ -268,7 +268,7 @@ async fn scale_deployment_to_zero() {
 
     let dep = dep_api.get("e2e-scale").await.unwrap();
     let sk = ScaleKind::Deployment(dep);
-    sk.scale(client.clone()).await.unwrap();
+    sk.scale(client.clone(), None, 30).await.unwrap();
 
     // verify it scaled to zero
     let dep = dep_api.get("e2e-scale").await.unwrap();
@@ -323,7 +323,7 @@ async fn scale_statefulset_to_zero() {
 
     let ss = ss_api.get("e2e-scale-ss").await.unwrap();
     let sk = ScaleKind::StatefulSet(ss);
-    sk.scale(client.clone()).await.unwrap();
+    sk.scale(client.clone(), None, 30).await.unwrap();
 
     let ss = ss_api.get("e2e-scale-ss").await.unwrap();
     let replicas = ss.spec.unwrap().replicas.unwrap_or(1);

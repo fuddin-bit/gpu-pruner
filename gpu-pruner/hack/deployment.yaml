@@ -23,11 +23,18 @@ spec:
             - '--run-mode=scale-down'
             - '--prometheus-url=http://thanos-querier.openshift-monitoring.svc.cluster.local'
             - '--dashboard-port=8080'
+            - '--slack-channel=#test-pruner'
           env:
             - name: RUST_BACKTRACE
               value: '1'
             - name: RUST_LOG
               value: info
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gpu-pruner-slack-webhook
+                  key: webhook-url
+                  optional: true
           ports:
             - containerPort: 8080
               name: dashboard

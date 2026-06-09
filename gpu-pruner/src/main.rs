@@ -1,7 +1,5 @@
 use minijinja::{Environment, context};
 
-mod dashboard;
-
 #[cfg(feature = "otel")]
 use std::sync::LazyLock;
 #[cfg(feature = "otel")]
@@ -15,7 +13,7 @@ use {
     tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer},
 };
 
-use std::{collections::HashSet, fmt::Debug, sync::atomic::AtomicUsize};
+use std::{collections::HashSet, fmt::Debug, sync::{atomic::AtomicUsize, Arc}};
 use tokio::{sync::mpsc::Sender, time};
 
 use tracing_subscriber::EnvFilter;
@@ -36,8 +34,9 @@ use kube::{Api, Client as KubeClient, Resource};
 use clap::{Parser, ValueEnum};
 
 use gpu_pruner::{
-    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, find_root_object,
-    get_enabled_resources, get_prom_client, get_prometheus_token,
+    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, check_acknowledgment,
+    find_root_object, get_enabled_resources, get_prom_client, get_prometheus_token,
+    slack::SlackNotifier,
 };
 
 /// `gpu-pruner` is a tool to prune idle pods based on GPU utilization. It uses Prometheus to query
@@ -119,9 +118,15 @@ struct Cli {
     #[clap(short, long, default_value = "default")]
     log_format: LogFormat,
 
-    /// Enable the web dashboard on the specified port
+    /// Slack webhook URL for notifications. Can also be set via SLACK_WEBHOOK_URL env var.
+    /// Messages will be sent to the configured channel when idle GPUs are detected.
     #[clap(long)]
-    dashboard_port: Option<u16>,
+    slack_webhook_url: Option<String>,
+
+    /// Slack channel to send notifications to
+    #[clap(long, default_value = "#test-pruner")]
+    slack_channel: String,
+
 }
 
 #[derive(Debug, Clone, ValueEnum, Default, Serialize)]
@@ -287,20 +292,28 @@ async fn main() -> anyhow::Result<()> {
     let enabled_resources = get_enabled_resources(&args.enabled_resources);
     tracing::info!("Enabled resources: {enabled_resources:?}");
 
+    // Initialize Slack notifier if webhook URL is provided
+    let slack_notifier = args
+        .slack_webhook_url
+        .clone()
+        .or_else(|| std::env::var("SLACK_WEBHOOK_URL").ok())
+        .map(|url| {
+            tracing::info!("Slack notifications enabled for channel: {}", args.slack_channel);
+            Arc::new(SlackNotifier::new(url, args.slack_channel.clone()))
+        });
+
+    if slack_notifier.is_none() {
+        tracing::info!("Slack notifications disabled (no webhook URL configured)");
+    }
+
     let env: Environment = Environment::new();
     let query = env.render_str(include_str!("query.promql.j2"), context! { args })?;
     tracing::info!("Running w/ Query: {query}");
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ScaleKind>(100);
 
-    // Initialize dashboard state if dashboard is enabled
-    let dashboard_state = std::sync::Arc::new(tokio::sync::RwLock::new(
-        dashboard::DashboardState::default(),
-    ));
-
     let query_task = {
         let args = args.clone();
-        let dashboard_state = dashboard_state.clone();
         tokio::spawn(async move {
             let mut interval =
                 time::interval(tokio::time::Duration::from_secs(args.check_interval));
@@ -310,7 +323,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let client = build_prom_client(&args).await;
-                match run_query_and_scale(client, query.clone(), &args, tx.clone(), dashboard_state.clone()).await {
+                match run_query_and_scale(client, query.clone(), &args, tx.clone()).await {
                     Ok(qr) => {
                         QUERY_FAILURES.store(0, std::sync::atomic::Ordering::Relaxed);
                         gpu_pruner::metrics::QUERY_SUCCESSES.inc();
@@ -349,29 +362,33 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
-    let scale_down_task = tokio::spawn(async move {
-        let kube_client = KubeClient::try_default()
-            .await
-            .expect("failed to get kube client");
+    let scale_down_task = {
+        let slack_notifier = slack_notifier.clone();
+        let duration = args.duration;
+        tokio::spawn(async move {
+            let kube_client = KubeClient::try_default()
+                .await
+                .expect("failed to get kube client");
 
-        while let Some(sk) = rx.recv().await {
-            // Check if the resource is enabled
-            if !enabled_resources.contains(sk.clone().into()) {
-                tracing::info!(
-                    "Skipping resource type {kind:?} because it is not enabled",
-                    kind = sk.kind()
-                );
-                continue;
-            }
+            while let Some(sk) = rx.recv().await {
+                // Check if the resource is enabled
+                if !enabled_resources.contains(sk.clone().into()) {
+                    tracing::info!(
+                        "Skipping resource type {kind:?} because it is not enabled",
+                        kind = sk.kind()
+                    );
+                    continue;
+                }
 
-            if let Err(e) = sk.scale(kube_client.clone()).await {
-                gpu_pruner::metrics::SCALE_FAILURES.inc();
-                tracing::error!(
-                    monotonic_counter.scale_failures = 1,
-                    "Failed to scale resource! {e}"
-                );
-                continue;
-            }
+                let notifier = slack_notifier.as_ref().map(|n| (**n).clone());
+                if let Err(e) = sk.scale(kube_client.clone(), notifier, duration).await {
+                    gpu_pruner::metrics::SCALE_FAILURES.inc();
+                    tracing::error!(
+                        monotonic_counter.scale_failures = 1,
+                        "Failed to scale resource! {e}"
+                    );
+                    continue;
+                }
 
             let kind = sk.kind();
             let name = sk.name();
@@ -385,32 +402,15 @@ async fn main() -> anyhow::Result<()> {
                 name = name,
                 namespace = namespace
             )
-        }
-    });
-
-    // Start dashboard server if requested
-    let dashboard_task = if let Some(port) = args.dashboard_port {
-        let dashboard_state = dashboard_state.clone();
-        Some(tokio::spawn(async move {
-            dashboard::run_server(dashboard_state, port).await
-        }))
-    } else {
-        None
+            }
+        })
     };
 
     // Wait for all tasks
-    if let Some(dashboard_task) = dashboard_task {
-        _ = tokio::try_join! {
-            query_task,
-            scale_down_task,
-            dashboard_task
-        }?;
-    } else {
-        _ = tokio::try_join! {
-            query_task,
-            scale_down_task
-        }?;
-    }
+    _ = tokio::try_join! {
+        query_task,
+        scale_down_task
+    }?;
 
     Ok(())
 }
@@ -434,7 +434,6 @@ async fn run_query_and_scale(
     query: String,
     args: &Cli,
     tx: Sender<ScaleKind>,
-    dashboard_state: dashboard::SharedDashboardState,
 ) -> anyhow::Result<QueryResponse> {
     let response = match client.query(query).get().await {
         Ok(response) => response,
@@ -577,16 +576,44 @@ async fn run_query_and_scale(
 
     let num_shutdown_events = shutdown_events.len();
 
-    // Update dashboard state
-    dashboard::update_dashboard_state(
-        dashboard_state,
-        shutdown_events.iter().cloned().collect(),
-        num_pods,
-    )
-    .await;
+    // Check acknowledgment status for all idle workloads
+    let workloads_with_ack: Vec<(ScaleKind, Option<gpu_pruner::AckStatus>)> =
+        futures::stream::iter(shutdown_events.iter().cloned())
+            .then(|obj| async {
+                let ack_status = check_acknowledgment(kube_client.clone(), &obj).await.ok();
+                (obj, ack_status)
+            })
+            .collect()
+            .await;
 
-    futures::stream::iter(shutdown_events)
-        .filter_map(|obj| async {
+    // Count acknowledged workloads and update metrics
+    let acknowledged_count = workloads_with_ack
+        .iter()
+        .filter(|(_, ack)| ack.as_ref().map(|a| a.acknowledged).unwrap_or(false))
+        .count();
+
+    gpu_pruner::metrics::ACKNOWLEDGED_WORKLOADS.set(acknowledged_count as i64);
+
+    // Filter out acknowledged workloads before scaling
+    futures::stream::iter(workloads_with_ack)
+        .filter_map(|(obj, ack_status)| async move {
+            // Skip acknowledged workloads
+            if let Some(ack) = &ack_status {
+                if ack.acknowledged {
+                    tracing::info!(
+                        "Skipping [{}] {}:{} - acknowledged until {} by {}",
+                        obj.kind(),
+                        obj.namespace().unwrap_or_default(),
+                        obj.name(),
+                        ack.expires_at.as_ref().unwrap_or(&"unknown".to_string()),
+                        ack.by_user.as_ref().unwrap_or(&"unknown".to_string())
+                    );
+                    gpu_pruner::metrics::SCALEDOWNS_PREVENTED_TOTAL.inc();
+                    return None;
+                }
+            }
+
+            // Apply dry-run filter
             if let Mode::DryRun = args.run_mode {
                 tracing::info!(
                     "Dry-run: Would have sent [{}] {}:{} for scaledown",
