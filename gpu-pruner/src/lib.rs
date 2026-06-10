@@ -460,6 +460,75 @@ impl Scaler for ScaleKind {
     }
 }
 
+/// Apply acknowledgment annotation to a workload
+#[tracing::instrument(skip(client))]
+pub async fn acknowledge_workload(
+    client: KubeClient,
+    kind: &str,
+    name: &str,
+    namespace: &str,
+    duration_hours: u32,
+    user: &str,
+) -> anyhow::Result<()> {
+    use chrono::Duration;
+
+    // Calculate expiry timestamp
+    let now = chrono::Utc::now();
+    let expires_at = now + Duration::hours(duration_hours as i64);
+    let expires_at_rfc3339 = expires_at.to_rfc3339();
+
+    // Build annotation patch
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                "gpu-pruner.io/ack-until": expires_at_rfc3339,
+                "gpu-pruner.io/ack-by": user,
+            }
+        }
+    });
+
+    // Apply patch based on resource kind
+    match kind {
+        "Deployment" => {
+            let api: Api<Deployment> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        "ReplicaSet" => {
+            let api: Api<ReplicaSet> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        "StatefulSet" => {
+            let api: Api<StatefulSet> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        "Notebook" => {
+            let api: Api<Notebook> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        "InferenceService" => {
+            let api: Api<InferenceService> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        _ => {
+            return Err(anyhow::anyhow!("Unsupported resource kind: {}", kind));
+        }
+    }
+
+    // Increment metrics
+    metrics::ACKNOWLEDGMENTS_TOTAL.inc();
+
+    tracing::info!(
+        "Acknowledged [{kind}] {namespace}:{name} by {user} until {expires_at_rfc3339}"
+    );
+
+    Ok(())
+}
+
 /// Check if a workload has an active acknowledgment annotation
 #[tracing::instrument(skip(_client))]
 pub async fn check_acknowledgment(

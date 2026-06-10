@@ -5,4 +5,5 @@ resources:
 - clusterrole.yaml
 - service.yaml
 - route.yaml
+- slack-interactions-route.yaml
 - servicemonitor.yaml

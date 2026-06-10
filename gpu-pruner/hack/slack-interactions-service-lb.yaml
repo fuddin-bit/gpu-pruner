@@ -1,0 +1,26 @@
+# Optional: CoreWeave CKS LoadBalancer for Slack interactions (no OpenShift Route).
+# Apply standalone when not using slack-interactions-route.yaml:
+#   kubectl apply -f gpu-pruner/hack/slack-interactions-service-lb.yaml
+#
+# Requires TLS termination in front of this service (Slack requires HTTPS).
+# Set Slack App → Interactive Components → Request URL to:
+#   https://<external-hostname>/slack/interactions
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-pruner-slack
+  namespace: gpu-pruner-system
+  labels:
+    app: gpu-pruner
+  annotations:
+    service.beta.kubernetes.io/coreweave-load-balancer-type: "public"
+    service.beta.kubernetes.io/external-hostname: "gpu-pruner-slack"
+spec:
+  type: LoadBalancer
+  selector:
+    app: gpu-pruner
+  ports:
+    - name: slack-interactions
+      protocol: TCP
+      port: 3002
+      targetPort: 3002

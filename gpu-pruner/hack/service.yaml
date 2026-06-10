@@ -10,7 +10,11 @@ spec:
   selector:
     app: gpu-pruner
   ports:
-    - name: http
+    - name: dashboard
       protocol: TCP
       port: 8080
       targetPort: 8080
+    - name: slack-interactions
+      protocol: TCP
+      port: 3002
+      targetPort: 3002

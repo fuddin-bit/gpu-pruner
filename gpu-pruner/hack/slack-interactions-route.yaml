@@ -1,0 +1,21 @@
+# OpenShift Route exposing Slack interactive component callbacks over HTTPS.
+# After apply, set Slack App → Interactive Components → Request URL to:
+#   https://$(kubectl get route gpu-pruner-slack -n gpu-pruner-system -o jsonpath='{.spec.host}')/slack/interactions
+kind: Route
+apiVersion: route.openshift.io/v1
+metadata:
+  name: gpu-pruner-slack
+  namespace: gpu-pruner-system
+  labels:
+    app: gpu-pruner
+spec:
+  to:
+    kind: Service
+    name: gpu-pruner-dashboard
+    weight: 100
+  port:
+    targetPort: slack-interactions
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

@@ -26,6 +26,7 @@ use futures::stream::StreamExt;
 
 use prometheus_http_query::Client;
 use serde::Serialize;
+use serde_json::json;
 
 use jiff::{SignedDuration, Timestamp};
 use k8s_openapi::api::core::v1::Pod;
@@ -34,10 +35,19 @@ use kube::{Api, Client as KubeClient, Resource};
 use clap::{Parser, ValueEnum};
 
 use gpu_pruner::{
-    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, check_acknowledgment,
+    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, acknowledge_workload, check_acknowledgment,
     find_root_object, get_enabled_resources, get_prom_client, get_prometheus_token,
     slack::SlackNotifier,
 };
+
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+    Router,
+};
+use std::net::SocketAddr;
 
 /// `gpu-pruner` is a tool to prune idle pods based on GPU utilization. It uses Prometheus to query
 /// GPU utilization metrics and scales down pods that have been idle for a certain duration.
@@ -132,6 +142,11 @@ struct Cli {
     #[clap(long, default_value = "#test-pruner")]
     slack_channel: String,
 
+    /// Port to listen for Slack interactive component callbacks (button clicks).
+    /// Required if you want users to acknowledge idle GPUs from Slack messages.
+    #[clap(long)]
+    slack_interaction_port: Option<u16>,
+
 }
 
 #[derive(Debug, Clone, ValueEnum, Default, Serialize)]
@@ -150,6 +165,202 @@ enum LogFormat {
 }
 
 static QUERY_FAILURES: AtomicUsize = AtomicUsize::new(0);
+
+// Slack interaction handler state
+#[derive(Clone)]
+struct SlackInteractionState {
+    kube_client: KubeClient,
+}
+
+// Slack interaction payload structures
+#[derive(Debug, serde::Deserialize)]
+struct SlackVerificationPayload {
+    #[serde(rename = "type")]
+    payload_type: String,
+    challenge: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SlackInteractionPayload {
+    user: SlackUser,
+    actions: Vec<SlackAction>,
+    response_url: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SlackUser {
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SlackAction {
+    value: String,
+}
+
+// Handler for Slack interactive component callbacks
+async fn handle_slack_interaction(
+    State(state): State<SlackInteractionState>,
+    body: String,
+) -> Response {
+    tracing::info!("Received Slack interaction callback");
+
+    // Parse the form-encoded payload
+    let payload_str = match serde_urlencoded::from_str::<Vec<(String, String)>>(&body) {
+        Ok(params) => {
+            // Slack sends the payload in a "payload" field
+            params
+                .into_iter()
+                .find(|(k, _)| k == "payload")
+                .map(|(_, v)| v)
+                .unwrap_or_default()
+        }
+        Err(e) => {
+            tracing::error!("Failed to parse form data: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid form data").into_response();
+        }
+    };
+
+    // Parse the JSON payload
+    if payload_str.is_empty() {
+        tracing::info!("Received empty Slack interaction payload (URL verification probe)");
+        return (StatusCode::OK, "OK").into_response();
+    }
+
+    if let Ok(verification) = serde_json::from_str::<SlackVerificationPayload>(&payload_str) {
+        if verification.payload_type == "url_verification" {
+            if let Some(challenge) = verification.challenge {
+                tracing::info!("Responding to Slack URL verification challenge");
+                return (StatusCode::OK, challenge).into_response();
+            }
+        }
+    }
+
+    let payload: SlackInteractionPayload = match serde_json::from_str(&payload_str) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to parse Slack payload JSON: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid JSON payload").into_response();
+        }
+    };
+
+    // Extract action value (format: kind:namespace:name:duration)
+    let action_value = match payload.actions.first() {
+        Some(action) => &action.value,
+        None => {
+            tracing::error!("No action found in payload");
+            return (StatusCode::BAD_REQUEST, "No action found").into_response();
+        }
+    };
+
+    let parts: Vec<&str> = action_value.split(':').collect();
+    if parts.len() != 4 {
+        tracing::error!("Invalid action value format: {}", action_value);
+        return (StatusCode::BAD_REQUEST, "Invalid action value").into_response();
+    }
+
+    let (kind, namespace, name, duration_str) = (parts[0], parts[1], parts[2], parts[3]);
+    let duration_hours: u32 = match duration_str.parse() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("Failed to parse duration: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid duration").into_response();
+        }
+    };
+
+    let user = &payload.user.name;
+
+    // Apply acknowledgment
+    match acknowledge_workload(
+        state.kube_client.clone(),
+        kind,
+        name,
+        namespace,
+        duration_hours,
+        user,
+    )
+    .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                "Successfully acknowledged [{kind}] {namespace}:{name} for {duration_hours}h by {user}"
+            );
+
+            // Send response back to Slack to update the message
+            let response_message = json!({
+                "replace_original": true,
+                "attachments": [{
+                    "color": "good",
+                    "title": "✓ GPU Idle Acknowledgment Confirmed",
+                    "fields": [
+                        {
+                            "title": "Resource",
+                            "value": format!("{}: {}", kind, name),
+                            "short": true
+                        },
+                        {
+                            "title": "Namespace",
+                            "value": namespace,
+                            "short": true
+                        },
+                        {
+                            "title": "Acknowledged By",
+                            "value": user,
+                            "short": true
+                        },
+                        {
+                            "title": "Duration",
+                            "value": format!("{} hours", duration_hours),
+                            "short": true
+                        },
+                        {
+                            "title": "Status",
+                            "value": format!("GPU will not be scaled down for the next {} hours", duration_hours),
+                            "short": false
+                        }
+                    ],
+                    "footer": "gpu-pruner",
+                    "ts": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                }]
+            });
+
+            // Send the response to Slack via response_url
+            if let Err(e) = reqwest::Client::new()
+                .post(&payload.response_url)
+                .json(&response_message)
+                .send()
+                .await
+            {
+                tracing::error!("Failed to send response to Slack: {}", e);
+            }
+
+            (StatusCode::OK, "Acknowledged").into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to acknowledge workload: {}", e);
+
+            // Send error response to Slack
+            let error_message = json!({
+                "replace_original": false,
+                "text": format!("❌ Failed to acknowledge: {}", e),
+                "response_type": "ephemeral"
+            });
+
+            if let Err(e) = reqwest::Client::new()
+                .post(&payload.response_url)
+                .json(&error_message)
+                .send()
+                .await
+            {
+                tracing::error!("Failed to send error response to Slack: {}", e);
+            }
+
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to acknowledge").into_response()
+        }
+    }
+}
 
 #[cfg(feature = "otel")]
 static RESOURCE: LazyLock<OTELResource> = LazyLock::new(|| {
@@ -411,11 +622,48 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
+    // Spawn Slack interaction HTTP server if port is configured
+    let slack_interaction_task = if let Some(port) = args.slack_interaction_port {
+        let kube_client = KubeClient::try_default()
+            .await
+            .expect("failed to get kube client for slack interactions");
+
+        let state = SlackInteractionState { kube_client };
+
+        let app = Router::new()
+            .route("/slack/interactions", post(handle_slack_interaction))
+            .with_state(state);
+
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        tracing::info!("Starting Slack interaction server on {}", addr);
+
+        Some(tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .expect("failed to bind slack interaction server");
+            axum::serve(listener, app)
+                .await
+                .expect("failed to start slack interaction server");
+            Ok::<(), anyhow::Error>(())
+        }))
+    } else {
+        tracing::info!("Slack interaction server disabled (no --slack-interaction-port set)");
+        None
+    };
+
     // Wait for all tasks
-    _ = tokio::try_join! {
-        query_task,
-        scale_down_task
-    }?;
+    if let Some(interaction_task) = slack_interaction_task {
+        _ = tokio::try_join! {
+            query_task,
+            scale_down_task,
+            interaction_task
+        }?;
+    } else {
+        _ = tokio::try_join! {
+            query_task,
+            scale_down_task
+        }?;
+    }
 
     Ok(())
 }

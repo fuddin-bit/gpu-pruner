@@ -35,9 +35,15 @@ impl SlackNotifier {
         let resource_name = workload.name();
         let namespace = workload.namespace().unwrap_or_else(|| "default".to_string());
 
+        // Encode workload info in button values: kind:namespace:name:duration
+        let button_value_4h = format!("{}:{}:{}:4", resource_type, namespace, resource_name);
+        let button_value_8h = format!("{}:{}:{}:8", resource_type, namespace, resource_name);
+        let button_value_24h = format!("{}:{}:{}:24", resource_type, namespace, resource_name);
+
         let payload = json!({
             "channel": self.channel,
             "attachments": [{
+                "callback_id": "ack_idle_gpu",
                 "color": "warning",
                 "title": "🔔 Idle GPU Detected - Scale Down Pending",
                 "fields": [
@@ -58,8 +64,31 @@ impl SlackNotifier {
                     },
                     {
                         "title": "Action",
-                        "value": "Scaling to 0 replicas",
+                        "value": "Scaling to 0 replicas unless acknowledged",
                         "short": false
+                    }
+                ],
+                "actions": [
+                    {
+                        "name": "ack",
+                        "text": "Keep 4h",
+                        "type": "button",
+                        "value": button_value_4h,
+                        "style": "primary"
+                    },
+                    {
+                        "name": "ack",
+                        "text": "Keep 8h",
+                        "type": "button",
+                        "value": button_value_8h,
+                        "style": "primary"
+                    },
+                    {
+                        "name": "ack",
+                        "text": "Keep 24h",
+                        "type": "button",
+                        "value": button_value_24h,
+                        "style": "primary"
                     }
                 ],
                 "footer": "gpu-pruner",
