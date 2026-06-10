@@ -1,0 +1,6 @@
+# Namespace-scoped deploy only — no ClusterRole, ClusterRoleBinding, or ServiceMonitor.
+#
+# Usage:
+#   NS=fuddin-dev ./gpu-pruner/hack/apply-user-namespace.sh
+#
+# Exposes Slack interactions via CoreWeave LoadBalancer (not OpenShift Route).
