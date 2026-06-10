@@ -96,6 +96,7 @@ A Grafana dashboard is included in `gpu-dashboard.json` for more detailed GPU mo
 - **Idle GPU Workloads**: GPUs with zero compute activity for 30+ minutes
 - **Idle GPU Time by Deployment**: Deployments producing the most allocated GPU idle time (see [Prometheus Queries](#prometheus-queries) below)
 - **GPU Allocation Leaderboard**: Total GPU requests per namespace
+- **GPU Health & DCGM**: Temperature, power, VRAM %, memory-copy util, XID errors, and optional DCGM profiling metrics
 
 ### Importing the Grafana Dashboard
 
@@ -138,6 +139,27 @@ The overview row uses **two independent partitions** of the same total. Each pai
 | Engine active (30m) | `count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) > 0)` |
 
 Equivalently: **Engine active** = Total − Engine idle, and **VRAM free** = Total − VRAM allocated, when the same DCGM time series are counted.
+
+### GPU Health & DCGM
+
+Panels in the **GPU Health & DCGM** row use additional dcgm-exporter counters. Profiling panels show no data unless your exporter exposes `DCGM_FI_PROF_*` metrics (same requirement as `DCGM_FI_PROF_GR_ENGINE_ACTIVE`).
+
+| Panel | PromQL |
+|-------|--------|
+| Peak GPU temperature | `max(DCGM_FI_DEV_GPU_TEMP)` |
+| Peak power (W) | `max(DCGM_FI_DEV_POWER_USAGE)` |
+| XID errors (total) | `sum(DCGM_FI_DEV_XID_ERRORS)` |
+| GPU temperature by node | `avg by (Hostname) (DCGM_FI_DEV_GPU_TEMP)` |
+| Power draw by node | `sum by (Hostname) (DCGM_FI_DEV_POWER_USAGE)` |
+| VRAM utilization % | `100 * avg by (Hostname, gpu) (DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL)` |
+| Memory copy utilization | `avg by (Hostname) (DCGM_FI_DEV_MEM_COPY_UTIL)` |
+| Graphics/compute engine active by node | `avg by (Hostname) (DCGM_FI_PROF_GR_ENGINE_ACTIVE)` |
+| XID errors (1h increase) | `sum by (Hostname, gpu) (increase(DCGM_FI_DEV_XID_ERRORS[1h]))` |
+| SM active by node | `avg by (Hostname) (DCGM_FI_PROF_SM_ACTIVE)` |
+| Tensor pipe active by node | `avg by (Hostname) (DCGM_FI_PROF_PIPE_TENSOR_ACTIVE)` |
+| DRAM active by node | `avg by (Hostname) (DCGM_FI_PROF_DRAM_ACTIVE)` |
+
+Note: gpu-pruner idle detection uses [`query.promql.j2`](gpu-pruner/src/query.promql.j2) at runtime; Grafana idle panels use related but simpler PromQL for visualization.
 
 ### Idle GPU Time by Deployment Query
 

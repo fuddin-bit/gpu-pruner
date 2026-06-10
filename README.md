@@ -16,6 +16,24 @@ The background for `gpu-pruner` is that in certain environments it is very easy 
 
 This culler politely pauses workloads that appear idle by scaling them down to 0 replicas. Features may be added in the future for better notifications, but the idea is that a user can simply re-enable the workload when they are ready to test/demo again.
 
+## Acknowledgment System
+
+**NEW**: Prevent unwanted scale-downs by acknowledging workloads that are intentionally idle.
+
+Users can acknowledge idle workloads via the web dashboard to prevent gpu-pruner from scaling them down. Use cases:
+- Loading large datasets
+- Model warm-up / compilation
+- Interactive debugging sessions
+- Scheduled batch jobs with intermittent GPU usage
+
+**Quick Start:**
+1. Open the web dashboard: `http://dashboard-url:8080`
+2. Enter your email address
+3. Click **4h**, **8h**, or **24h** buttons next to idle workloads
+4. Acknowledged workloads won't be scaled down until the acknowledgment expires
+
+See [ACKNOWLEDGMENT_GUIDE.md](ACKNOWLEDGMENT_GUIDE.md) for complete documentation, API usage, and troubleshooting.
+
 ## Dashboard
 
 The gpu-pruner includes both a **web dashboard** and a **Grafana dashboard** for monitoring GPU workloads.
@@ -26,6 +44,7 @@ Real-time web interface for monitoring GPU workloads. See [DASHBOARD.md](DASHBOA
 
 Features:
 - Real-time monitoring of idle GPU workloads
+- **Acknowledgment system** - prevent scale-downs with duration-based acknowledgments
 - Resource usage statistics
 - Modern web UI with auto-refresh
 - REST API endpoint for programmatic access
@@ -47,6 +66,25 @@ Import `gpu-dashboard.json` into Grafana for advanced analytics and visualizatio
 - **GPU Allocation Leaderboard**: Total GPU requests per namespace
 
 See [DASHBOARD.md](DASHBOARD.md) for import instructions and [IDLE_GPU_QUERY.md](IDLE_GPU_QUERY.md) for querying idle GPU time by deployment.
+
+#### Deploy Grafana with Helm
+
+For a complete standalone Grafana deployment with the GPU dashboard pre-configured:
+
+```bash
+# Add Grafana Helm repository
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+
+# Install Grafana with GPU dashboard
+helm install gpu-grafana grafana/grafana \
+  -f helm/grafana-values.yaml \
+  --set adminPassword='YOUR_SECURE_PASSWORD' \
+  --set datasources."datasources\.yaml".datasources[0].url='http://prometheus-k8s.monitoring.svc.cluster.local:9090' \
+  -n monitoring --create-namespace
+```
+
+See [GRAFANA_DEPLOYMENT.md](GRAFANA_DEPLOYMENT.md) for complete deployment instructions, configuration options, and troubleshooting.
 
 ## usage 
 

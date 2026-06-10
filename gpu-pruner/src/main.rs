@@ -1,7 +1,5 @@
 use minijinja::{Environment, context};
 
-mod dashboard;
-
 #[cfg(feature = "otel")]
 use std::sync::LazyLock;
 #[cfg(feature = "otel")]
@@ -15,7 +13,7 @@ use {
     tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer},
 };
 
-use std::{collections::HashSet, fmt::Debug, sync::atomic::AtomicUsize};
+use std::{collections::HashSet, fmt::Debug, sync::{atomic::AtomicUsize, Arc}};
 use tokio::{sync::mpsc::Sender, time};
 
 use tracing_subscriber::EnvFilter;
@@ -28,6 +26,7 @@ use futures::stream::StreamExt;
 
 use prometheus_http_query::Client;
 use serde::Serialize;
+use serde_json::json;
 
 use jiff::{SignedDuration, Timestamp};
 use k8s_openapi::api::core::v1::Pod;
@@ -36,9 +35,19 @@ use kube::{Api, Client as KubeClient, Resource};
 use clap::{Parser, ValueEnum};
 
 use gpu_pruner::{
-    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, find_root_object,
-    get_enabled_resources, get_prom_client, get_prometheus_token,
+    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, acknowledge_workload, check_acknowledgment,
+    find_root_object, get_enabled_resources, get_prom_client, get_prometheus_token,
+    slack::SlackNotifier,
 };
+
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+    Router,
+};
+use std::net::SocketAddr;
 
 /// `gpu-pruner` is a tool to prune idle pods based on GPU utilization. It uses Prometheus to query
 /// GPU utilization metrics and scales down pods that have been idle for a certain duration.
@@ -81,6 +90,11 @@ struct Cli {
     #[clap(short, long)]
     model_name: Option<String>,
 
+    /// Maximum combined GPU utilization (0.0–1.0) to still consider a GPU idle.
+    /// Defaults to 0.01 to tolerate DCGM background noise on DCGM_FI_PROF_GR_ENGINE_ACTIVE.
+    #[clap(long, default_value_t = 0.01)]
+    idle_threshold: f64,
+
     /// Power draw threshold in watts. When set, GPUs showing peak power usage above this value
     /// over the lookback window are excluded from idle candidates even if compute utilization is zero.
     /// Useful as a corroborating signal (e.g. 100 for A10G, 150 for A100/H100).
@@ -119,9 +133,20 @@ struct Cli {
     #[clap(short, long, default_value = "default")]
     log_format: LogFormat,
 
-    /// Enable the web dashboard on the specified port
+    /// Slack webhook URL for notifications. Can also be set via SLACK_WEBHOOK_URL env var.
+    /// Messages will be sent to the configured channel when idle GPUs are detected.
     #[clap(long)]
-    dashboard_port: Option<u16>,
+    slack_webhook_url: Option<String>,
+
+    /// Slack channel to send notifications to
+    #[clap(long, default_value = "#test-pruner")]
+    slack_channel: String,
+
+    /// Port to listen for Slack interactive component callbacks (button clicks).
+    /// Required if you want users to acknowledge idle GPUs from Slack messages.
+    #[clap(long)]
+    slack_interaction_port: Option<u16>,
+
 }
 
 #[derive(Debug, Clone, ValueEnum, Default, Serialize)]
@@ -140,6 +165,202 @@ enum LogFormat {
 }
 
 static QUERY_FAILURES: AtomicUsize = AtomicUsize::new(0);
+
+// Slack interaction handler state
+#[derive(Clone)]
+struct SlackInteractionState {
+    kube_client: KubeClient,
+}
+
+// Slack interaction payload structures
+#[derive(Debug, serde::Deserialize)]
+struct SlackVerificationPayload {
+    #[serde(rename = "type")]
+    payload_type: String,
+    challenge: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SlackInteractionPayload {
+    user: SlackUser,
+    actions: Vec<SlackAction>,
+    response_url: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SlackUser {
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SlackAction {
+    value: String,
+}
+
+// Handler for Slack interactive component callbacks
+async fn handle_slack_interaction(
+    State(state): State<SlackInteractionState>,
+    body: String,
+) -> Response {
+    tracing::info!("Received Slack interaction callback");
+
+    // Parse the form-encoded payload
+    let payload_str = match serde_urlencoded::from_str::<Vec<(String, String)>>(&body) {
+        Ok(params) => {
+            // Slack sends the payload in a "payload" field
+            params
+                .into_iter()
+                .find(|(k, _)| k == "payload")
+                .map(|(_, v)| v)
+                .unwrap_or_default()
+        }
+        Err(e) => {
+            tracing::error!("Failed to parse form data: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid form data").into_response();
+        }
+    };
+
+    // Parse the JSON payload
+    if payload_str.is_empty() {
+        tracing::info!("Received empty Slack interaction payload (URL verification probe)");
+        return (StatusCode::OK, "OK").into_response();
+    }
+
+    if let Ok(verification) = serde_json::from_str::<SlackVerificationPayload>(&payload_str) {
+        if verification.payload_type == "url_verification" {
+            if let Some(challenge) = verification.challenge {
+                tracing::info!("Responding to Slack URL verification challenge");
+                return (StatusCode::OK, challenge).into_response();
+            }
+        }
+    }
+
+    let payload: SlackInteractionPayload = match serde_json::from_str(&payload_str) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to parse Slack payload JSON: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid JSON payload").into_response();
+        }
+    };
+
+    // Extract action value (format: kind:namespace:name:duration)
+    let action_value = match payload.actions.first() {
+        Some(action) => &action.value,
+        None => {
+            tracing::error!("No action found in payload");
+            return (StatusCode::BAD_REQUEST, "No action found").into_response();
+        }
+    };
+
+    let parts: Vec<&str> = action_value.split(':').collect();
+    if parts.len() != 4 {
+        tracing::error!("Invalid action value format: {}", action_value);
+        return (StatusCode::BAD_REQUEST, "Invalid action value").into_response();
+    }
+
+    let (kind, namespace, name, duration_str) = (parts[0], parts[1], parts[2], parts[3]);
+    let duration_hours: u32 = match duration_str.parse() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("Failed to parse duration: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid duration").into_response();
+        }
+    };
+
+    let user = &payload.user.name;
+
+    // Apply acknowledgment
+    match acknowledge_workload(
+        state.kube_client.clone(),
+        kind,
+        name,
+        namespace,
+        duration_hours,
+        user,
+    )
+    .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                "Successfully acknowledged [{kind}] {namespace}:{name} for {duration_hours}h by {user}"
+            );
+
+            // Send response back to Slack to update the message
+            let response_message = json!({
+                "replace_original": true,
+                "attachments": [{
+                    "color": "good",
+                    "title": "✓ GPU Idle Acknowledgment Confirmed",
+                    "fields": [
+                        {
+                            "title": "Resource",
+                            "value": format!("{}: {}", kind, name),
+                            "short": true
+                        },
+                        {
+                            "title": "Namespace",
+                            "value": namespace,
+                            "short": true
+                        },
+                        {
+                            "title": "Acknowledged By",
+                            "value": user,
+                            "short": true
+                        },
+                        {
+                            "title": "Duration",
+                            "value": format!("{} hours", duration_hours),
+                            "short": true
+                        },
+                        {
+                            "title": "Status",
+                            "value": format!("GPU will not be scaled down for the next {} hours", duration_hours),
+                            "short": false
+                        }
+                    ],
+                    "footer": "gpu-pruner",
+                    "ts": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                }]
+            });
+
+            // Send the response to Slack via response_url
+            if let Err(e) = reqwest::Client::new()
+                .post(&payload.response_url)
+                .json(&response_message)
+                .send()
+                .await
+            {
+                tracing::error!("Failed to send response to Slack: {}", e);
+            }
+
+            (StatusCode::OK, "Acknowledged").into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to acknowledge workload: {}", e);
+
+            // Send error response to Slack
+            let error_message = json!({
+                "replace_original": false,
+                "text": format!("❌ Failed to acknowledge: {}", e),
+                "response_type": "ephemeral"
+            });
+
+            if let Err(e) = reqwest::Client::new()
+                .post(&payload.response_url)
+                .json(&error_message)
+                .send()
+                .await
+            {
+                tracing::error!("Failed to send error response to Slack: {}", e);
+            }
+
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to acknowledge").into_response()
+        }
+    }
+}
 
 #[cfg(feature = "otel")]
 static RESOURCE: LazyLock<OTELResource> = LazyLock::new(|| {
@@ -287,20 +508,28 @@ async fn main() -> anyhow::Result<()> {
     let enabled_resources = get_enabled_resources(&args.enabled_resources);
     tracing::info!("Enabled resources: {enabled_resources:?}");
 
+    // Initialize Slack notifier if webhook URL is provided
+    let slack_notifier = args
+        .slack_webhook_url
+        .clone()
+        .or_else(|| std::env::var("SLACK_WEBHOOK_URL").ok())
+        .map(|url| {
+            tracing::info!("Slack notifications enabled for channel: {}", args.slack_channel);
+            Arc::new(SlackNotifier::new(url, args.slack_channel.clone()))
+        });
+
+    if slack_notifier.is_none() {
+        tracing::info!("Slack notifications disabled (no webhook URL configured)");
+    }
+
     let env: Environment = Environment::new();
     let query = env.render_str(include_str!("query.promql.j2"), context! { args })?;
     tracing::info!("Running w/ Query: {query}");
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ScaleKind>(100);
 
-    // Initialize dashboard state if dashboard is enabled
-    let dashboard_state = std::sync::Arc::new(tokio::sync::RwLock::new(
-        dashboard::DashboardState::default(),
-    ));
-
     let query_task = {
         let args = args.clone();
-        let dashboard_state = dashboard_state.clone();
         tokio::spawn(async move {
             let mut interval =
                 time::interval(tokio::time::Duration::from_secs(args.check_interval));
@@ -310,7 +539,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let client = build_prom_client(&args).await;
-                match run_query_and_scale(client, query.clone(), &args, tx.clone(), dashboard_state.clone()).await {
+                match run_query_and_scale(client, query.clone(), &args, tx.clone()).await {
                     Ok(qr) => {
                         QUERY_FAILURES.store(0, std::sync::atomic::Ordering::Relaxed);
                         gpu_pruner::metrics::QUERY_SUCCESSES.inc();
@@ -349,29 +578,33 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
-    let scale_down_task = tokio::spawn(async move {
-        let kube_client = KubeClient::try_default()
-            .await
-            .expect("failed to get kube client");
+    let scale_down_task = {
+        let slack_notifier = slack_notifier.clone();
+        let duration = args.duration;
+        tokio::spawn(async move {
+            let kube_client = KubeClient::try_default()
+                .await
+                .expect("failed to get kube client");
 
-        while let Some(sk) = rx.recv().await {
-            // Check if the resource is enabled
-            if !enabled_resources.contains(sk.clone().into()) {
-                tracing::info!(
-                    "Skipping resource type {kind:?} because it is not enabled",
-                    kind = sk.kind()
-                );
-                continue;
-            }
+            while let Some(sk) = rx.recv().await {
+                // Check if the resource is enabled
+                if !enabled_resources.contains(sk.clone().into()) {
+                    tracing::info!(
+                        "Skipping resource type {kind:?} because it is not enabled",
+                        kind = sk.kind()
+                    );
+                    continue;
+                }
 
-            if let Err(e) = sk.scale(kube_client.clone()).await {
-                gpu_pruner::metrics::SCALE_FAILURES.inc();
-                tracing::error!(
-                    monotonic_counter.scale_failures = 1,
-                    "Failed to scale resource! {e}"
-                );
-                continue;
-            }
+                let notifier = slack_notifier.as_ref().map(|n| (**n).clone());
+                if let Err(e) = sk.scale(kube_client.clone(), notifier, duration).await {
+                    gpu_pruner::metrics::SCALE_FAILURES.inc();
+                    tracing::error!(
+                        monotonic_counter.scale_failures = 1,
+                        "Failed to scale resource! {e}"
+                    );
+                    continue;
+                }
 
             let kind = sk.kind();
             let name = sk.name();
@@ -385,25 +618,45 @@ async fn main() -> anyhow::Result<()> {
                 name = name,
                 namespace = namespace
             )
-        }
-    });
+            }
+        })
+    };
 
-    // Start dashboard server if requested
-    let dashboard_task = if let Some(port) = args.dashboard_port {
-        let dashboard_state = dashboard_state.clone();
+    // Spawn Slack interaction HTTP server if port is configured
+    let slack_interaction_task = if let Some(port) = args.slack_interaction_port {
+        let kube_client = KubeClient::try_default()
+            .await
+            .expect("failed to get kube client for slack interactions");
+
+        let state = SlackInteractionState { kube_client };
+
+        let app = Router::new()
+            .route("/slack/interactions", post(handle_slack_interaction))
+            .with_state(state);
+
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        tracing::info!("Starting Slack interaction server on {}", addr);
+
         Some(tokio::spawn(async move {
-            dashboard::run_server(dashboard_state, port).await
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .expect("failed to bind slack interaction server");
+            axum::serve(listener, app)
+                .await
+                .expect("failed to start slack interaction server");
+            Ok::<(), anyhow::Error>(())
         }))
     } else {
+        tracing::info!("Slack interaction server disabled (no --slack-interaction-port set)");
         None
     };
 
     // Wait for all tasks
-    if let Some(dashboard_task) = dashboard_task {
+    if let Some(interaction_task) = slack_interaction_task {
         _ = tokio::try_join! {
             query_task,
             scale_down_task,
-            dashboard_task
+            interaction_task
         }?;
     } else {
         _ = tokio::try_join! {
@@ -434,7 +687,6 @@ async fn run_query_and_scale(
     query: String,
     args: &Cli,
     tx: Sender<ScaleKind>,
-    dashboard_state: dashboard::SharedDashboardState,
 ) -> anyhow::Result<QueryResponse> {
     let response = match client.query(query).get().await {
         Ok(response) => response,
@@ -577,16 +829,44 @@ async fn run_query_and_scale(
 
     let num_shutdown_events = shutdown_events.len();
 
-    // Update dashboard state
-    dashboard::update_dashboard_state(
-        dashboard_state,
-        shutdown_events.iter().cloned().collect(),
-        num_pods,
-    )
-    .await;
+    // Check acknowledgment status for all idle workloads
+    let workloads_with_ack: Vec<(ScaleKind, Option<gpu_pruner::AckStatus>)> =
+        futures::stream::iter(shutdown_events.iter().cloned())
+            .then(|obj| async {
+                let ack_status = check_acknowledgment(kube_client.clone(), &obj).await.ok();
+                (obj, ack_status)
+            })
+            .collect()
+            .await;
 
-    futures::stream::iter(shutdown_events)
-        .filter_map(|obj| async {
+    // Count acknowledged workloads and update metrics
+    let acknowledged_count = workloads_with_ack
+        .iter()
+        .filter(|(_, ack)| ack.as_ref().map(|a| a.acknowledged).unwrap_or(false))
+        .count();
+
+    gpu_pruner::metrics::ACKNOWLEDGED_WORKLOADS.set(acknowledged_count as i64);
+
+    // Filter out acknowledged workloads before scaling
+    futures::stream::iter(workloads_with_ack)
+        .filter_map(|(obj, ack_status)| async move {
+            // Skip acknowledged workloads
+            if let Some(ack) = &ack_status {
+                if ack.acknowledged {
+                    tracing::info!(
+                        "Skipping [{}] {}:{} - acknowledged until {} by {}",
+                        obj.kind(),
+                        obj.namespace().unwrap_or_default(),
+                        obj.name(),
+                        ack.expires_at.as_ref().unwrap_or(&"unknown".to_string()),
+                        ack.by_user.as_ref().unwrap_or(&"unknown".to_string())
+                    );
+                    gpu_pruner::metrics::SCALEDOWNS_PREVENTED_TOTAL.inc();
+                    return None;
+                }
+            }
+
+            // Apply dry-run filter
             if let Mode::DryRun = args.run_mode {
                 tracing::info!(
                     "Dry-run: Would have sent [{}] {}:{} for scaledown",
@@ -659,6 +939,22 @@ mod tests {
             query.contains("/ 100"),
             "fallback should normalize 0-100 to 0-1"
         );
+    }
+
+    #[test]
+    fn query_uses_idle_threshold_not_strict_zero() {
+        let query = render(json!({ "duration": 30 }));
+        assert!(
+            query.contains("< 0.01"),
+            "default idle threshold should be 0.01, not == 0"
+        );
+        assert!(!query.contains("== 0"), "should not use strict == 0");
+    }
+
+    #[test]
+    fn query_idle_threshold_is_configurable() {
+        let query = render(json!({ "duration": 30, "idle_threshold": 0.05 }));
+        assert!(query.contains("< 0.05"), "should use configured idle threshold");
     }
 
     #[test]

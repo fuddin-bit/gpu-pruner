@@ -1,0 +1,172 @@
+# Grafana Helm Chart Values for Vanilla Kubernetes
+#
+# Standard Kubernetes configuration with Ingress and custom Prometheus
+#
+# Usage:
+#   helm install gpu-grafana grafana/grafana \
+#     -f helm/grafana-values.yaml \
+#     -f helm/grafana-values-vanilla-k8s.yaml \
+#     -n monitoring --create-namespace
+
+# Override Prometheus datasource for custom Prometheus deployment
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        # Update this URL to match your Prometheus service
+        # Common patterns:
+        #   Prometheus Operator: http://prometheus-k8s.monitoring.svc.cluster.local:9090
+        #   Kube-prometheus-stack: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        #   Custom deployment: http://prometheus.prometheus.svc.cluster.local:9090
+        url: http://prometheus-k8s.monitoring.svc.cluster.local:9090
+        access: proxy
+        isDefault: true
+        uid: PBFA97CFB590B2093
+        editable: true
+        jsonData:
+          timeInterval: 30s
+          queryTimeout: 60s
+          httpMethod: POST
+        # If your Prometheus requires authentication:
+        # basicAuth: true
+        # basicAuthUser: admin
+        # secureJsonData:
+        #   basicAuthPassword: 'YOUR_PASSWORD_HERE'
+
+# Ingress configuration (nginx example)
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    # For large dashboards or long queries:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+  hosts:
+    - grafana-gpu.example.com
+  tls:
+    - secretName: grafana-tls
+      hosts:
+        - grafana-gpu.example.com
+  path: /
+  pathType: Prefix
+
+# Alternative: Traefik Ingress configuration
+# ingress:
+#   enabled: true
+#   ingressClassName: traefik
+#   annotations:
+#     cert-manager.io/cluster-issuer: letsencrypt-prod
+#     traefik.ingress.kubernetes.io/router.entrypoints: websecure
+#     traefik.ingress.kubernetes.io/router.tls: "true"
+#   hosts:
+#     - grafana-gpu.example.com
+#   tls:
+#     - secretName: grafana-tls
+#       hosts:
+#         - grafana-gpu.example.com
+
+# Service configuration (ClusterIP with Ingress)
+service:
+  enabled: true
+  type: ClusterIP
+  port: 3000
+  targetPort: 3000
+
+# For LoadBalancer service (alternative to Ingress):
+# service:
+#   type: LoadBalancer
+#   loadBalancerIP: 192.168.1.100  # Optional: static IP
+#   annotations:
+#     service.beta.kubernetes.io/aws-load-balancer-type: "nlb"  # For AWS
+#     cloud.google.com/load-balancer-type: "Internal"  # For GCP
+
+# For NodePort service (alternative to Ingress):
+# service:
+#   type: NodePort
+#   nodePort: 30300
+#   port: 3000
+
+# Security context for standard Kubernetes
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 472
+  fsGroup: 472
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  fsGroup: 472
+
+# Environment variables
+env:
+  GF_SECURITY_ADMIN_PASSWORD__FILE: /etc/secrets/admin-password
+  GF_SERVER_ROOT_URL: https://grafana-gpu.example.com
+  GF_SERVER_DOMAIN: grafana-gpu.example.com
+  GF_ANALYTICS_REPORTING_ENABLED: "false"
+  GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+
+# Grafana configuration
+grafana.ini:
+  server:
+    domain: grafana-gpu.example.com
+    root_url: https://grafana-gpu.example.com
+  analytics:
+    reporting_enabled: false
+    check_for_updates: false
+  log:
+    mode: console
+    level: info
+  auth.anonymous:
+    enabled: false
+  security:
+    admin_user: admin
+  dashboards:
+    default_home_dashboard_path: /var/lib/grafana/dashboards/gpu-pruner/gpu-dashboard.json
+
+# Service account
+serviceAccount:
+  create: true
+  name: grafana
+  annotations: {}
+
+# RBAC
+rbac:
+  create: true
+  pspEnabled: false
+  extraClusterRoleRules:
+    - apiGroups:
+        - ""
+      resources:
+        - configmaps
+      verbs:
+        - get
+        - list
+        - watch
+
+# Optional: PodDisruptionBudget for high availability
+# podDisruptionBudget:
+#   minAvailable: 1
+
+# Optional: HorizontalPodAutoscaler
+# autoscaling:
+#   enabled: true
+#   minReplicas: 1
+#   maxReplicas: 3
+#   targetCPU: 80
+#   targetMemory: 80
+
+# Optional: Node affinity to schedule on specific nodes
+# nodeSelector:
+#   node-role.kubernetes.io/monitoring: "true"
+
+# Optional: Tolerations for tainted nodes
+# tolerations:
+#   - key: monitoring
+#     operator: Equal
+#     value: "true"
+#     effect: NoSchedule

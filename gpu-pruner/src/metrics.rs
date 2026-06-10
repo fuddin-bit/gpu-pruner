@@ -54,6 +54,38 @@ lazy_static! {
         "Total number of pods analyzed in last query"
     )
     .expect("metric can be created");
+
+    // Acknowledgment metrics
+    pub static ref ACKNOWLEDGED_WORKLOADS: IntGauge = IntGauge::new(
+        "gpu_pruner_acknowledged_workloads",
+        "Current number of workloads with active acknowledgments"
+    )
+    .expect("metric can be created");
+
+    pub static ref ACKNOWLEDGMENTS_TOTAL: IntCounter = IntCounter::new(
+        "gpu_pruner_acknowledgments_total",
+        "Total number of acknowledgments created"
+    )
+    .expect("metric can be created");
+
+    pub static ref SCALEDOWNS_PREVENTED_TOTAL: IntCounter = IntCounter::new(
+        "gpu_pruner_scaledowns_prevented_total",
+        "Total number of scale-downs prevented by acknowledgments"
+    )
+    .expect("metric can be created");
+
+    // Slack notification metrics
+    pub static ref SLACK_NOTIFICATIONS_SENT: IntCounter = IntCounter::new(
+        "gpu_pruner_slack_notifications_sent_total",
+        "Total number of Slack notifications successfully sent"
+    )
+    .expect("metric can be created");
+
+    pub static ref SLACK_NOTIFICATION_FAILURES: IntCounter = IntCounter::new(
+        "gpu_pruner_slack_notification_failures_total",
+        "Total number of failed Slack notification attempts"
+    )
+    .expect("metric can be created");
 }
 
 pub fn init() {
@@ -81,6 +113,21 @@ pub fn init() {
     REGISTRY
         .register(Box::new(PODS_CHECKED.clone()))
         .expect("pods_checked can be registered");
+    REGISTRY
+        .register(Box::new(ACKNOWLEDGED_WORKLOADS.clone()))
+        .expect("acknowledged_workloads can be registered");
+    REGISTRY
+        .register(Box::new(ACKNOWLEDGMENTS_TOTAL.clone()))
+        .expect("acknowledgments_total can be registered");
+    REGISTRY
+        .register(Box::new(SCALEDOWNS_PREVENTED_TOTAL.clone()))
+        .expect("scaledowns_prevented_total can be registered");
+    REGISTRY
+        .register(Box::new(SLACK_NOTIFICATIONS_SENT.clone()))
+        .expect("slack_notifications_sent can be registered");
+    REGISTRY
+        .register(Box::new(SLACK_NOTIFICATION_FAILURES.clone()))
+        .expect("slack_notification_failures can be registered");
 }
 
 pub fn render() -> String {

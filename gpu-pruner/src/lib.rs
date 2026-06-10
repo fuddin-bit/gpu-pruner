@@ -1,4 +1,5 @@
 pub mod metrics;
+pub mod slack;
 
 use clap::ValueEnum;
 use k8s_openapi::{
@@ -34,6 +35,13 @@ use kube::{
     Api, Client as KubeClient,
     api::{ObjectMeta, Patch, PatchParams},
 };
+
+#[derive(Debug, Clone)]
+pub struct AckStatus {
+    pub acknowledged: bool,
+    pub expires_at: Option<String>,
+    pub by_user: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub enum ScaleKind {
@@ -197,8 +205,12 @@ pub trait Meta {
 }
 
 pub trait Scaler {
-    fn scale(&self, client: Client)
-    -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    fn scale(
+        &self,
+        client: Client,
+        slack_notifier: Option<slack::SlackNotifier>,
+        idle_duration_minutes: i64,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 
     fn generate_scale_event(&self) -> anyhow::Result<Event>;
 }
@@ -337,8 +349,13 @@ impl Meta for ScaleKind {
 }
 
 impl Scaler for ScaleKind {
-    #[tracing::instrument(skip(self, client))]
-    async fn scale(&self, client: Client) -> anyhow::Result<()> {
+    #[tracing::instrument(skip(self, client, slack_notifier))]
+    async fn scale(
+        &self,
+        client: Client,
+        slack_notifier: Option<slack::SlackNotifier>,
+        idle_duration_minutes: i64,
+    ) -> anyhow::Result<()> {
         if let Some(ns) = self.namespace() {
             let event = self.generate_scale_event()?;
             let events_api: Api<Event> = Api::namespaced(client.clone(), &ns);
@@ -347,6 +364,20 @@ impl Scaler for ScaleKind {
                 tracing::error!("Failed to push Event for scale down!: {e}");
             } else {
                 tracing::debug!("Emitted scale event for: {:?}", event.involved_object);
+            }
+
+            // Send Slack notification if configured
+            if let Some(notifier) = slack_notifier {
+                match notifier.send_notification(self, idle_duration_minutes).await {
+                    Ok(_) => {
+                        metrics::SLACK_NOTIFICATIONS_SENT.inc();
+                    }
+                    Err(e) => {
+                        metrics::SLACK_NOTIFICATION_FAILURES.inc();
+                        tracing::error!("Failed to send Slack notification: {e}");
+                        // Continue with scale-down even if notification fails
+                    }
+                }
             }
         };
 
@@ -427,6 +458,132 @@ impl Scaler for ScaleKind {
         };
         Ok(event)
     }
+}
+
+/// Apply acknowledgment annotation to a workload
+#[tracing::instrument(skip(client))]
+pub async fn acknowledge_workload(
+    client: KubeClient,
+    kind: &str,
+    name: &str,
+    namespace: &str,
+    duration_hours: u32,
+    user: &str,
+) -> anyhow::Result<()> {
+    use chrono::Duration;
+
+    // Calculate expiry timestamp
+    let now = chrono::Utc::now();
+    let expires_at = now + Duration::hours(duration_hours as i64);
+    let expires_at_rfc3339 = expires_at.to_rfc3339();
+
+    // Build annotation patch
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                "gpu-pruner.io/ack-until": expires_at_rfc3339,
+                "gpu-pruner.io/ack-by": user,
+            }
+        }
+    });
+
+    // Apply patch based on resource kind
+    match kind {
+        "Deployment" => {
+            let api: Api<Deployment> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        "ReplicaSet" => {
+            let api: Api<ReplicaSet> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        "StatefulSet" => {
+            let api: Api<StatefulSet> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        "Notebook" => {
+            let api: Api<Notebook> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        "InferenceService" => {
+            let api: Api<InferenceService> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+                .await?;
+        }
+        _ => {
+            return Err(anyhow::anyhow!("Unsupported resource kind: {}", kind));
+        }
+    }
+
+    // Increment metrics
+    metrics::ACKNOWLEDGMENTS_TOTAL.inc();
+
+    tracing::info!(
+        "Acknowledged [{kind}] {namespace}:{name} by {user} until {expires_at_rfc3339}"
+    );
+
+    Ok(())
+}
+
+/// Check if a workload has an active acknowledgment annotation
+#[tracing::instrument(skip(_client))]
+pub async fn check_acknowledgment(
+    _client: KubeClient,
+    workload: &ScaleKind,
+) -> anyhow::Result<AckStatus> {
+    use chrono::DateTime;
+
+    let annotations = match workload {
+        ScaleKind::Deployment(d) => d.metadata.annotations.clone(),
+        ScaleKind::ReplicaSet(r) => r.metadata.annotations.clone(),
+        ScaleKind::StatefulSet(s) => s.metadata.annotations.clone(),
+        ScaleKind::Notebook(n) => n.metadata.annotations.clone(),
+        ScaleKind::InferenceService(i) => i.metadata.annotations.clone(),
+    };
+
+    let annotations = match annotations {
+        Some(a) => a,
+        None => {
+            return Ok(AckStatus {
+                acknowledged: false,
+                expires_at: None,
+                by_user: None,
+            })
+        }
+    };
+
+    let ack_until = annotations.get("gpu-pruner.io/ack-until");
+    let ack_by = annotations.get("gpu-pruner.io/ack-by");
+
+    if let Some(expires_at_str) = ack_until {
+        // Parse the timestamp and check if it's still valid
+        if let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at_str) {
+            let now = chrono::Utc::now();
+            if expires_at.timestamp() > now.timestamp() {
+                return Ok(AckStatus {
+                    acknowledged: true,
+                    expires_at: Some(expires_at_str.clone()),
+                    by_user: ack_by.cloned(),
+                });
+            } else {
+                tracing::info!(
+                    "Acknowledgment expired for {} in {}",
+                    workload.name(),
+                    workload.namespace().unwrap_or_default()
+                );
+            }
+        }
+    }
+
+    Ok(AckStatus {
+        acknowledged: false,
+        expires_at: None,
+        by_user: None,
+    })
 }
 
 /// Crawl up the owner references to find the root Deployment or StatefulSet
