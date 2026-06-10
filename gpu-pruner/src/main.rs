@@ -80,6 +80,11 @@ struct Cli {
     #[clap(short, long)]
     model_name: Option<String>,
 
+    /// Maximum combined GPU utilization (0.0–1.0) to still consider a GPU idle.
+    /// Defaults to 0.01 to tolerate DCGM background noise on DCGM_FI_PROF_GR_ENGINE_ACTIVE.
+    #[clap(long, default_value_t = 0.01)]
+    idle_threshold: f64,
+
     /// Power draw threshold in watts. When set, GPUs showing peak power usage above this value
     /// over the lookback window are excluded from idle candidates even if compute utilization is zero.
     /// Useful as a corroborating signal (e.g. 100 for A10G, 150 for A100/H100).
@@ -686,6 +691,22 @@ mod tests {
             query.contains("/ 100"),
             "fallback should normalize 0-100 to 0-1"
         );
+    }
+
+    #[test]
+    fn query_uses_idle_threshold_not_strict_zero() {
+        let query = render(json!({ "duration": 30 }));
+        assert!(
+            query.contains("< 0.01"),
+            "default idle threshold should be 0.01, not == 0"
+        );
+        assert!(!query.contains("== 0"), "should not use strict == 0");
+    }
+
+    #[test]
+    fn query_idle_threshold_is_configurable() {
+        let query = render(json!({ "duration": 30, "idle_threshold": 0.05 }));
+        assert!(query.contains("< 0.05"), "should use configured idle threshold");
     }
 
     #[test]
