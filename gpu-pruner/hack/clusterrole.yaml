@@ -51,6 +51,4 @@ rules:
       - patch
       - delete
     apiGroups:
-      - serving.kserve.io
-    resources:
       - inferenceservices

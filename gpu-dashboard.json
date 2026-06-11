@@ -75,13 +75,13 @@
     },
     {
       "title": "Engine idle (30m)",
-      "description": "No graphics/compute engine activity for the full 30m window. PromQL: count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) == 0). Complements Engine active (30m); the pair sums to Total.",
+      "description": "GPUs with < 1% engine activity for the full 30m window. Uses DCGM_FI_PROF_GR_ENGINE_ACTIVE or DCGM_FI_DEV_GPU_UTIL fallback. Matches gpu-pruner logic. Complements Engine active (30m); the pair sums to Total.",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
-          "expr": "count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) == 0)",
+          "expr": "count((max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) or max_over_time(DCGM_FI_DEV_GPU_UTIL[30m]) / 100) < 0.01)",
           "legendFormat": "Idle (30m)",
           "refId": "Idle (30m)"
         }
@@ -96,13 +96,13 @@
     },
     {
       "title": "Engine active (30m)",
-      "description": "Had graphics/compute engine activity at least once in 30m. PromQL: count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) > 0). Equals Total − Engine idle (30m).",
+      "description": "GPUs with ≥ 1% engine activity at least once in 30m. Uses DCGM_FI_PROF_GR_ENGINE_ACTIVE or DCGM_FI_DEV_GPU_UTIL fallback. Equals Total − Engine idle (30m).",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
-          "expr": "count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) > 0)",
+          "expr": "count((max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) or max_over_time(DCGM_FI_DEV_GPU_UTIL[30m]) / 100) >= 0.01)",
           "legendFormat": "Active (30m)",
           "refId": "Active (30m)"
         }
@@ -226,13 +226,13 @@
     },
     {
       "title": "Idle GPU Workloads (Zero Compute for 30m+)",
-      "description": "GPUs where max compute engine activity was 0 for the entire 30-minute window. These are candidates for pruning.",
+      "description": "GPUs where max compute engine activity was < 1% for the entire 30-minute window. Uses DCGM_FI_PROF_GR_ENGINE_ACTIVE or falls back to DCGM_FI_DEV_GPU_UTIL. Matches gpu-pruner detection logic.",
       "type": "table",
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 23 },
       "datasource": { "type": "prometheus", "uid": "PBFA97CFB590B2093" },
       "targets": [
         {
-          "expr": "max by (Hostname, gpu, modelName) (max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m])) == 0",
+          "expr": "(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{pod != \"\"}[30m]) or max_over_time(DCGM_FI_DEV_GPU_UTIL{pod != \"\"}[30m]) / 100) < 0.01",
           "legendFormat": "",
           "format": "table",
           "instant": true,
