@@ -336,3 +336,128 @@ kubectl logs -n fuddin-dev --context coreweave-waldorf deployment/gpu-pruner | g
 - Documented troubleshooting steps and next actions
 
 **Outstanding**: RBAC permissions from cluster admin to enable full functionality
+
+---
+
+## Grafana Dashboard Alignment
+
+The Grafana dashboard (`gpu-dashboard.json`) was updated so idle/active panels use the same PromQL logic as gpu-pruner. The dashboard now reflects exactly which GPUs would trigger pruning actions—not just GPUs at absolute zero utilization.
+
+### Summary
+
+| Change | Before | After |
+|--------|--------|-------|
+| Primary metric | `DCGM_FI_PROF_GR_ENGINE_ACTIVE` only | `DCGM_FI_PROF_GR_ENGINE_ACTIVE` with `DCGM_FI_DEV_GPU_UTIL` fallback |
+| Idle threshold | `== 0` (exactly zero) | `< 0.01` (< 1%) |
+| Active threshold | `> 0` | `>= 0.01` (≥ 1%) |
+| Source of truth | Dashboard-only queries | Matches `gpu-pruner/src/query.promql.j2` |
+
+> **Threshold note:** The default `idle_threshold` in `query.promql.j2` is `0.01` (1%). This aligns with the 0.1 (1%) threshold tuned in the June 9 deployment.
+
+### Panel Changes
+
+#### 1. Engine idle (30m)
+
+**Location:** `gpu-dashboard.json` lines 77–96
+
+**Before:**
+
+```promql
+count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) == 0)
+```
+
+**After:**
+
+```promql
+count(
+  (max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m])
+   or max_over_time(DCGM_FI_DEV_GPU_UTIL[30m]) / 100)
+  < 0.01
+)
+```
+
+Counts GPUs with **< 1%** engine activity for the full 30-minute window, using the same fallback strategy as gpu-pruner.
+
+---
+
+#### 2. Engine active (30m)
+
+**Location:** `gpu-dashboard.json` lines 98–117
+
+**Before:**
+
+```promql
+count(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m]) > 0)
+```
+
+**After:**
+
+```promql
+count(
+  (max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m])
+   or max_over_time(DCGM_FI_DEV_GPU_UTIL[30m]) / 100)
+  >= 0.01
+)
+```
+
+Counts GPUs with **≥ 1%** engine activity at least once in 30m. Complements Engine idle; the pair sums to Total.
+
+---
+
+#### 3. Idle GPU Workloads table
+
+**Location:** `gpu-dashboard.json` lines 228–262
+
+**Before:**
+
+```promql
+max by (Hostname, gpu, modelName) (
+  max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE[30m])
+) == 0
+```
+
+**After:**
+
+```promql
+(max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{pod != ""}[30m])
+ or max_over_time(DCGM_FI_DEV_GPU_UTIL{pod != ""}[30m]) / 100)
+< 0.01
+```
+
+Matches the exact query logic from `gpu-pruner/src/query.promql.j2`. Filters to workloads with an assigned pod.
+
+---
+
+#### 4. Panel descriptions
+
+All three panels now document:
+
+- Primary metric: `DCGM_FI_PROF_GR_ENGINE_ACTIVE`
+- Fallback metric: `DCGM_FI_DEV_GPU_UTIL`
+- Explicit **1% threshold**
+- Note that logic **matches gpu-pruner**
+
+### Why This Matters
+
+1. **Metric fallback consistency** — Dashboard and pruner share the same primary/fallback strategy.
+2. **Threshold alignment** — Idle detection uses `< 0.01`, not `== 0`, matching `query.promql.j2` and the June 9 tuning.
+3. **Honest monitoring** — Panels show GPUs that would actually be pruned, not only those at zero.
+4. **Slack integration** — Alerts in `#test-pruner` use the same threshold, so Grafana and Slack stay in sync.
+
+### Related Components
+
+```mermaid
+flowchart LR
+  DCGM[DCGM metrics] --> Prom[Prometheus]
+  Prom --> Pruner[gpu-pruner<br/>query.promql.j2]
+  Prom --> Grafana[Grafana dashboard]
+  Pruner --> Slack[Slack #test-pruner]
+  Grafana -.->|same idle logic| Pruner
+```
+
+| Component | Role |
+|-----------|------|
+| Prometheus `/metrics` | Exports `DCGM_FI_PROF_GR_ENGINE_ACTIVE` and `DCGM_FI_DEV_GPU_UTIL` |
+| `gpu-pruner/src/query.promql.j2` | Source of truth for idle detection |
+| `gpu-dashboard.json` | Visualizes idle/active counts and workload tables |
+| Slack notifications | Alerts on the same `< 0.01` threshold |
