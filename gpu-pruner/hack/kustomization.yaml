@@ -1,4 +1,5 @@
 resources:
+- namespace.yaml
 - crs.yaml
 - deployment.yaml
 - serviceaccount.yaml
