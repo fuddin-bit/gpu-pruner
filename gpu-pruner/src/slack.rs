@@ -33,7 +33,9 @@ impl SlackNotifier {
     ) -> Result<()> {
         let resource_type = workload.kind();
         let resource_name = workload.name();
-        let namespace = workload.namespace().unwrap_or_else(|| "default".to_string());
+        let namespace = workload
+            .namespace()
+            .unwrap_or_else(|| "default".to_string());
 
         // Encode workload info in button values: kind:namespace:name:duration
         let button_value_4h = format!("{}:{}:{}:4", resource_type, namespace, resource_name);
@@ -123,9 +125,7 @@ impl SlackNotifier {
             ));
         }
 
-        tracing::info!(
-            "Sent Slack notification for [{resource_type}] {namespace}:{resource_name}",
-        );
+        tracing::info!("Sent Slack notification for [{resource_type}] {namespace}:{resource_name}",);
 
         Ok(())
     }
@@ -141,7 +141,10 @@ mod tests {
             "https://hooks.slack.com/services/TEST".to_string(),
             "#test-pruner".to_string(),
         );
-        assert_eq!(notifier.webhook_url, "https://hooks.slack.com/services/TEST");
+        assert_eq!(
+            notifier.webhook_url,
+            "https://hooks.slack.com/services/TEST"
+        );
         assert_eq!(notifier.channel, "#test-pruner");
     }
 

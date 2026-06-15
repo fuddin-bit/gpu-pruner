@@ -13,7 +13,11 @@ use {
     tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer},
 };
 
-use std::{collections::HashSet, fmt::Debug, sync::{atomic::AtomicUsize, Arc}};
+use std::{
+    collections::HashSet,
+    fmt::Debug,
+    sync::{Arc, atomic::AtomicUsize},
+};
 use tokio::{sync::mpsc::Sender, time};
 
 use tracing_subscriber::EnvFilter;
@@ -35,17 +39,17 @@ use kube::{Api, Client as KubeClient, Resource};
 use clap::{Parser, ValueEnum};
 
 use gpu_pruner::{
-    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, acknowledge_workload, check_acknowledgment,
-    find_root_object, get_enabled_resources, get_prom_client, get_prometheus_token,
-    slack::SlackNotifier,
+    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, acknowledge_workload,
+    check_acknowledgment, find_root_object, get_enabled_resources, get_prom_client,
+    get_prometheus_token, slack::SlackNotifier,
 };
 
 use axum::{
+    Router,
     extract::State,
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Router,
 };
 use std::net::SocketAddr;
 
@@ -146,7 +150,6 @@ struct Cli {
     /// Required if you want users to acknowledge idle GPUs from Slack messages.
     #[clap(long)]
     slack_interaction_port: Option<u16>,
-
 }
 
 #[derive(Debug, Clone, ValueEnum, Default, Serialize)]
@@ -514,7 +517,10 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .or_else(|| std::env::var("SLACK_WEBHOOK_URL").ok())
         .map(|url| {
-            tracing::info!("Slack notifications enabled for channel: {}", args.slack_channel);
+            tracing::info!(
+                "Slack notifications enabled for channel: {}",
+                args.slack_channel
+            );
             Arc::new(SlackNotifier::new(url, args.slack_channel.clone()))
         });
 
@@ -544,7 +550,8 @@ async fn main() -> anyhow::Result<()> {
                         QUERY_FAILURES.store(0, std::sync::atomic::Ordering::Relaxed);
                         gpu_pruner::metrics::QUERY_SUCCESSES.inc();
                         gpu_pruner::metrics::QUERY_CANDIDATES.inc_by(qr.num_pods as u64);
-                        gpu_pruner::metrics::QUERY_SHUTDOWN_EVENTS.inc_by(qr.shutdown_events as u64);
+                        gpu_pruner::metrics::QUERY_SHUTDOWN_EVENTS
+                            .inc_by(qr.shutdown_events as u64);
                         tracing::info!(monotonic_counter.query_successes = 1, "Query succeeded");
                         tracing::info!(
                             counter.query_returned_candidates = qr.num_pods,
@@ -606,21 +613,21 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-            let kind = sk.kind();
-            let name = sk.name();
-            let namespace = sk.namespace().unwrap_or_else(|| "default".to_string());
+                let kind = sk.kind();
+                let name = sk.name();
+                let namespace = sk.namespace().unwrap_or_else(|| "default".to_string());
 
-            gpu_pruner::metrics::SCALE_SUCCESSES.inc();
-            gpu_pruner::metrics::SCALES_TOTAL
-                .with_label_values(&[&kind, &namespace, &name])
-                .inc();
-            tracing::info!(
-                monotonic_counter.scale_successes = 1,
-                "Scaled Resource: [{kind}] - {namespace}:{name}",
-                kind = kind,
-                name = name,
-                namespace = namespace
-            )
+                gpu_pruner::metrics::SCALE_SUCCESSES.inc();
+                gpu_pruner::metrics::SCALES_TOTAL
+                    .with_label_values(&[&kind, &namespace, &name])
+                    .inc();
+                tracing::info!(
+                    monotonic_counter.scale_successes = 1,
+                    "Scaled Resource: [{kind}] - {namespace}:{name}",
+                    kind = kind,
+                    name = name,
+                    namespace = namespace
+                )
             }
         })
     };
@@ -983,7 +990,10 @@ mod tests {
     #[test]
     fn query_idle_threshold_is_configurable() {
         let query = render(json!({ "duration": 30, "idle_threshold": 0.05 }));
-        assert!(query.contains("< 0.05"), "should use configured idle threshold");
+        assert!(
+            query.contains("< 0.05"),
+            "should use configured idle threshold"
+        );
     }
 
     #[test]

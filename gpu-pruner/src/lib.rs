@@ -368,7 +368,10 @@ impl Scaler for ScaleKind {
 
             // Send Slack notification if configured
             if let Some(notifier) = slack_notifier {
-                match notifier.send_notification(self, idle_duration_minutes).await {
+                match notifier
+                    .send_notification(self, idle_duration_minutes)
+                    .await
+                {
                     Ok(_) => {
                         metrics::SLACK_NOTIFICATIONS_SENT.inc();
                     }
@@ -522,9 +525,7 @@ pub async fn acknowledge_workload(
     // Increment metrics
     metrics::ACKNOWLEDGMENTS_TOTAL.inc();
 
-    tracing::info!(
-        "Acknowledged [{kind}] {namespace}:{name} by {user} until {expires_at_rfc3339}"
-    );
+    tracing::info!("Acknowledged [{kind}] {namespace}:{name} by {user} until {expires_at_rfc3339}");
 
     Ok(())
 }
@@ -552,7 +553,7 @@ pub async fn check_acknowledgment(
                 acknowledged: false,
                 expires_at: None,
                 by_user: None,
-            })
+            });
         }
     };
 
