@@ -264,23 +264,21 @@ pub fn get_prom_client<P: AsRef<Path>>(
     }
 
     if let Some(certfile) = certfile {
-        if let Ok(cert_data) = std::fs::read(certfile) {
-            tracing::debug!("Read certificate file");
-            if let Ok(certs) = Certificate::from_pem_bundle(&cert_data) {
-                tracing::debug!("Parsed certificates from PEM bundle");
-                for cert in certs {
-                    tracing::debug!("Adding root certificate");
-                    r_client = r_client.add_root_certificate(cert);
-                }
-            } else {
-                tracing::error!("Failed to parse certificates from PEM bundle");
-                return Err(anyhow::anyhow!(
-                    "Failed to parse certificates from PEM bundle"
-                ));
-            }
-        } else {
+        let cert_data = std::fs::read(certfile).map_err(|_| {
             tracing::error!("Failed to read certificate file");
-            return Err(anyhow::anyhow!("Failed to read certificate file"));
+            anyhow::anyhow!("Failed to read certificate file")
+        })?;
+
+        tracing::debug!("Read certificate file");
+        let certs = Certificate::from_pem_bundle(&cert_data).map_err(|_| {
+            tracing::error!("Failed to parse certificates from PEM bundle");
+            anyhow::anyhow!("Failed to parse certificates from PEM bundle")
+        })?;
+
+        tracing::debug!("Parsed certificates from PEM bundle");
+        for cert in certs {
+            tracing::debug!("Adding root certificate");
+            r_client = r_client.add_root_certificate(cert);
         }
     }
 
@@ -560,23 +558,23 @@ pub async fn check_acknowledgment(
     let ack_until = annotations.get("gpu-pruner.io/ack-until");
     let ack_by = annotations.get("gpu-pruner.io/ack-by");
 
-    if let Some(expires_at_str) = ack_until {
+    if let Some(expires_at_str) = ack_until
+        && let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at_str)
+    {
         // Parse the timestamp and check if it's still valid
-        if let Ok(expires_at) = DateTime::parse_from_rfc3339(expires_at_str) {
-            let now = chrono::Utc::now();
-            if expires_at.timestamp() > now.timestamp() {
-                return Ok(AckStatus {
-                    acknowledged: true,
-                    expires_at: Some(expires_at_str.clone()),
-                    by_user: ack_by.cloned(),
-                });
-            } else {
-                tracing::info!(
-                    "Acknowledgment expired for {} in {}",
-                    workload.name(),
-                    workload.namespace().unwrap_or_default()
-                );
-            }
+        let now = chrono::Utc::now();
+        if expires_at.timestamp() > now.timestamp() {
+            return Ok(AckStatus {
+                acknowledged: true,
+                expires_at: Some(expires_at_str.clone()),
+                by_user: ack_by.cloned(),
+            });
+        } else {
+            tracing::info!(
+                "Acknowledgment expired for {} in {}",
+                workload.name(),
+                workload.namespace().unwrap_or_default()
+            );
         }
     }
 
@@ -622,17 +620,17 @@ pub async fn find_root_object(
                 "ReplicaSet" => {
                     tracing::info!("Found ReplicaSet!");
                     let rs_api: Api<ReplicaSet> = Api::namespaced(client.clone(), &namespace);
-                    if let Ok(rs) = rs_api.get(&or.name).await {
-                        if let Some(rs_meta) = rs.metadata.owner_references.as_ref() {
-                            for rs_or in rs_meta {
-                                if rs_or.kind == "Deployment" {
-                                    tracing::info!("Found Deployment owning ReplicaSet!");
-                                    let deployment_api: Api<Deployment> =
-                                        Api::namespaced(client.clone(), &namespace);
-                                    let deployment = deployment_api.get(&rs_or.name).await?;
+                    if let Ok(rs) = rs_api.get(&or.name).await
+                        && let Some(rs_meta) = rs.metadata.owner_references.as_ref()
+                    {
+                        for rs_or in rs_meta {
+                            if rs_or.kind == "Deployment" {
+                                tracing::info!("Found Deployment owning ReplicaSet!");
+                                let deployment_api: Api<Deployment> =
+                                    Api::namespaced(client.clone(), &namespace);
+                                let deployment = deployment_api.get(&rs_or.name).await?;
 
-                                    return Ok(ScaleKind::Deployment(deployment));
-                                }
+                                return Ok(ScaleKind::Deployment(deployment));
                             }
                         }
                         // fallthrough, replica set with no owners
@@ -642,17 +640,17 @@ pub async fn find_root_object(
                 "StatefulSet" => {
                     tracing::info!("Found StatefulSet!");
                     let ss_api: Api<StatefulSet> = Api::namespaced(client.clone(), &namespace);
-                    if let Ok(ss) = ss_api.get(&or.name).await {
-                        if let Some(ss_meta) = ss.metadata.owner_references.as_ref() {
-                            for ss_or in ss_meta {
-                                if ss_or.kind == "Notebook" {
-                                    tracing::info!("Found Notebook owning StatefulSet!");
-                                    let nb_api: Api<Notebook> =
-                                        Api::namespaced(client.clone(), &namespace);
-                                    let nb = nb_api.get(&ss_or.name).await?;
+                    if let Ok(ss) = ss_api.get(&or.name).await
+                        && let Some(ss_meta) = ss.metadata.owner_references.as_ref()
+                    {
+                        for ss_or in ss_meta {
+                            if ss_or.kind == "Notebook" {
+                                tracing::info!("Found Notebook owning StatefulSet!");
+                                let nb_api: Api<Notebook> =
+                                    Api::namespaced(client.clone(), &namespace);
+                                let nb = nb_api.get(&ss_or.name).await?;
 
-                                    return Ok(ScaleKind::Notebook(nb));
-                                }
+                                return Ok(ScaleKind::Notebook(nb));
                             }
                         }
                         // fallthrough, statefulset with no owners

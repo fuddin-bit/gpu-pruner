@@ -229,13 +229,12 @@ async fn handle_slack_interaction(
         return (StatusCode::OK, "OK").into_response();
     }
 
-    if let Ok(verification) = serde_json::from_str::<SlackVerificationPayload>(&payload_str) {
-        if verification.payload_type == "url_verification" {
-            if let Some(challenge) = verification.challenge {
-                tracing::info!("Responding to Slack URL verification challenge");
-                return (StatusCode::OK, challenge).into_response();
-            }
-        }
+    if let Ok(verification) = serde_json::from_str::<SlackVerificationPayload>(&payload_str)
+        && verification.payload_type == "url_verification"
+        && let Some(challenge) = verification.challenge
+    {
+        tracing::info!("Responding to Slack URL verification challenge");
+        return (StatusCode::OK, challenge).into_response();
     }
 
     let payload: SlackInteractionPayload = match serde_json::from_str(&payload_str) {
@@ -887,19 +886,19 @@ async fn run_query_and_scale(
     futures::stream::iter(workloads_with_ack)
         .filter_map(|(obj, ack_status)| async move {
             // Skip acknowledged workloads
-            if let Some(ack) = &ack_status {
-                if ack.acknowledged {
-                    tracing::info!(
-                        "Skipping [{}] {}:{} - acknowledged until {} by {}",
-                        obj.kind(),
-                        obj.namespace().unwrap_or_default(),
-                        obj.name(),
-                        ack.expires_at.as_ref().unwrap_or(&"unknown".to_string()),
-                        ack.by_user.as_ref().unwrap_or(&"unknown".to_string())
-                    );
-                    gpu_pruner::metrics::SCALEDOWNS_PREVENTED_TOTAL.inc();
-                    return None;
-                }
+            if let Some(ack) = &ack_status
+                && ack.acknowledged
+            {
+                tracing::info!(
+                    "Skipping [{}] {}:{} - acknowledged until {} by {}",
+                    obj.kind(),
+                    obj.namespace().unwrap_or_default(),
+                    obj.name(),
+                    ack.expires_at.as_ref().unwrap_or(&"unknown".to_string()),
+                    ack.by_user.as_ref().unwrap_or(&"unknown".to_string())
+                );
+                gpu_pruner::metrics::SCALEDOWNS_PREVENTED_TOTAL.inc();
+                return None;
             }
 
             // Apply dry-run filter
