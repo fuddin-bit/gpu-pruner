@@ -39,7 +39,7 @@ use kube::{Api, Client as KubeClient, Resource};
 use clap::{Parser, ValueEnum};
 
 use gpu_pruner::{
-    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, TlsMode, acknowledge_workload,
+    Meta, PodMetricData, QueryResponse, ScaleKind, Scaler, RootObjectError,TlsMode, acknowledge_workload,
     check_acknowledgment, find_root_object, get_enabled_resources, get_prom_client,
     get_prometheus_token, slack::SlackNotifier,
 };
