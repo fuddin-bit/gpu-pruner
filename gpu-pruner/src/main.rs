@@ -42,9 +42,9 @@ use gpu_pruner::{
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use std::net::SocketAddr;
@@ -611,6 +611,9 @@ async fn main() -> anyhow::Result<()> {
             let namespace = sk.namespace().unwrap_or_else(|| "default".to_string());
 
             gpu_pruner::metrics::SCALE_SUCCESSES.inc();
+            gpu_pruner::metrics::SCALES_TOTAL
+                .with_label_values(&[&kind, &namespace, &name])
+                .inc();
             tracing::info!(
                 monotonic_counter.scale_successes = 1,
                 "Scaled Resource: [{kind}] - {namespace}:{name}",
@@ -621,6 +624,28 @@ async fn main() -> anyhow::Result<()> {
             }
         })
     };
+
+    // Prometheus metrics endpoint (port 8080)
+    let metrics_task = tokio::spawn(async move {
+        let app = Router::new().route(
+            "/metrics",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    gpu_pruner::metrics::render(),
+                )
+            }),
+        );
+        let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+        tracing::info!("Starting metrics server on {}", addr);
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("failed to bind metrics server");
+        axum::serve(listener, app)
+            .await
+            .expect("failed to start metrics server");
+        Ok::<(), anyhow::Error>(())
+    });
 
     // Spawn Slack interaction HTTP server if port is configured
     let slack_interaction_task = if let Some(port) = args.slack_interaction_port {
@@ -656,12 +681,14 @@ async fn main() -> anyhow::Result<()> {
         _ = tokio::try_join! {
             query_task,
             scale_down_task,
+            metrics_task,
             interaction_task
         }?;
     } else {
         _ = tokio::try_join! {
             query_task,
-            scale_down_task
+            scale_down_task,
+            metrics_task
         }?;
     }
 
@@ -734,6 +761,7 @@ async fn run_query_and_scale(
         "Query returned {num_pods} series across {} unique pods",
         unique_pods.len()
     );
+    gpu_pruner::metrics::PODS_CHECKED.set(unique_pods.len() as i64);
 
     // Process pods concurrently (up to 10 at a time) instead of serially.
     // Each pod requires 1-3 API calls (get pod, walk owner refs), so parallelism
@@ -828,6 +856,7 @@ async fn run_query_and_scale(
     let shutdown_events: HashSet<ScaleKind> = results.into_iter().flatten().collect();
 
     let num_shutdown_events = shutdown_events.len();
+    gpu_pruner::metrics::IDLE_GPUS.set(num_shutdown_events as i64);
 
     // Check acknowledgment status for all idle workloads
     let workloads_with_ack: Vec<(ScaleKind, Option<gpu_pruner::AckStatus>)> =
