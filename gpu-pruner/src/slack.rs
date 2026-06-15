@@ -112,9 +112,9 @@ impl SlackNotifier {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             tracing::error!(
-                "Slack webhook returned error status {}: {}",
-                status,
-                body
+                status = %status,
+                body = %body,
+                "Slack webhook returned error status"
             );
             return Err(anyhow::anyhow!(
                 "Slack webhook failed with status {}: {}",
