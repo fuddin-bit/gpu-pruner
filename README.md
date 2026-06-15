@@ -57,13 +57,18 @@ gpu-pruner --dashboard-port=8080 -d --prometheus-url=...
 
 ### Grafana Dashboard
 
-Import `gpu-dashboard.json` into Grafana for advanced analytics and visualization:
+Import `gpu-dashboard.json` into Grafana for advanced analytics and visualization. The dashboard **auto-refreshes every 30 seconds**.
 
+- **gpu-pruner Activity**: Recent scale-downs, idle candidates from the last pruner check, and query health (requires Prometheus to scrape gpu-pruner `/metrics`; see below)
 - **Cluster GPU Overview**: Total GPUs; VRAM and engine-activity partitions (each pair sums to total)
 - **GPU Utilization Heatmap**: GPU utilization per node over time
-- **Idle GPU Workloads**: GPUs with zero compute activity for 30+ minutes
+- **Idle GPU Workloads**: Running pods idle for 30+ minutes; rows drop within ~1–2 minutes after scale-down (joined with live GPU requests)
 - **Idle GPU Time by Deployment**: Identify which deployments are wasting the most GPU allocation time ([see guide](IDLE_GPU_QUERY.md))
 - **GPU Allocation Leaderboard**: Total GPU requests per namespace
+
+**Live updates after scale-down:** Running GPU Workloads and idle workload panels use kube-state-metrics and filter to pods that still request GPUs, so scaled-down workloads disappear within about one to two minutes (kube-state-metrics + Prometheus scrape + dashboard refresh). The 30-minute idle **detection window** is unchanged and still matches gpu-pruner logic; only live visibility of terminated workloads improves.
+
+**gpu-pruner metrics:** gpu-pruner exposes Prometheus metrics on port **8080** at `/metrics` (including `gpu_pruner_scales_total`, `gpu_pruner_idle_gpus`, and scale success counters). Configure a `ServiceMonitor` so your Prometheus instance scrapes the gpu-pruner Service—see [`gpu-pruner/hack/servicemonitor.yaml`](gpu-pruner/hack/servicemonitor.yaml) or the [`user-namespace` overlay](gpu-pruner/hack/overlays/user-namespace/) for namespace-scoped deploys.
 
 See [DASHBOARD.md](DASHBOARD.md) for import instructions and [IDLE_GPU_QUERY.md](IDLE_GPU_QUERY.md) for querying idle GPU time by deployment.
 

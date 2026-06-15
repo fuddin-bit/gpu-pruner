@@ -1,0 +1,9 @@
+# Namespace-scoped deploy only — no ClusterRole or ClusterRoleBinding.
+# Includes ServiceMonitor so Prometheus scrapes gpu-pruner /metrics on port 8080.
+#
+# Usage (with base deploy):
+#   kubectl apply -k gpu-pruner/hack/overlays/user-namespace
+#
+# Exposes Slack interactions via CoreWeave LoadBalancer (not OpenShift Route).
+resources:
+  - servicemonitor.yaml

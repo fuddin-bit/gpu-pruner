@@ -1,9 +1,9 @@
 resources:
+- namespace.yaml
 - crs.yaml
 - deployment.yaml
 - serviceaccount.yaml
 - clusterrole.yaml
 - service.yaml
-- route.yaml
-- slack-interactions-route.yaml
+- slack-interactions-service-lb.yaml
 - servicemonitor.yaml

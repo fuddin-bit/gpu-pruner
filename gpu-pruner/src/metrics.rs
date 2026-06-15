@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
+use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncoder};
 
 lazy_static! {
     pub static ref REGISTRY: Registry = Registry::new();
@@ -42,10 +42,19 @@ lazy_static! {
     )
     .expect("metric can be created");
 
+    pub static ref SCALES_TOTAL: IntCounterVec = IntCounterVec::new(
+        Opts::new(
+            "gpu_pruner_scales_total",
+            "Total scale-down operations by resource kind, namespace, and name",
+        ),
+        &["kind", "namespace", "name"],
+    )
+    .expect("metric can be created");
+
     // Current state metrics (gauges)
     pub static ref IDLE_GPUS: IntGauge = IntGauge::new(
         "gpu_pruner_idle_gpus",
-        "Current number of idle GPUs detected in last check"
+        "Number of workloads eligible for scale-down in the last check"
     )
     .expect("metric can be created");
 
@@ -107,6 +116,9 @@ pub fn init() {
     REGISTRY
         .register(Box::new(SCALE_FAILURES.clone()))
         .expect("scale_failures can be registered");
+    REGISTRY
+        .register(Box::new(SCALES_TOTAL.clone()))
+        .expect("scales_total can be registered");
     REGISTRY
         .register(Box::new(IDLE_GPUS.clone()))
         .expect("idle_gpus can be registered");

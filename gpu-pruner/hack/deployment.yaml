@@ -2,7 +2,7 @@ kind: Deployment
 apiVersion: apps/v1
 metadata:
   name: gpu-pruner
-  namespace: gpu-pruner-system
+  namespace: fuddin-dev
 spec:
   replicas: 1
   selector:
@@ -16,13 +16,13 @@ spec:
       serviceAccountName: gpu-pruner
       containers:
         - name: container
-          image: 'ghcr.io/fuddin-bit/gpu-pruner:latest-otel'
+          image: 'ghcr.io/fuddin-bit/gpu-pruner:main'
           args:
             - 'gpu-pruner'
             - '-d'
             - '--run-mode=scale-down'
-            - '--prometheus-url=http://thanos-querier.openshift-monitoring.svc.cluster.local'
-            - '--dashboard-port=8080'
+            - '--prometheus-url=http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090'
+            - '--honor-labels'
             - '--slack-interaction-port=3002'
             - '--slack-channel=#test-pruner'
           env:
@@ -41,7 +41,7 @@ spec:
               name: dashboard
               protocol: TCP
             - containerPort: 3002
-              name: slack-interactions
+              name: slack-interact
               protocol: TCP
           resources:
             limits:
