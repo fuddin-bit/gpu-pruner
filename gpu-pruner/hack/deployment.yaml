@@ -16,7 +16,7 @@ spec:
       serviceAccountName: gpu-pruner
       containers:
         - name: container
-          image: 'ghcr.io/fuddin-bit/gpu-pruner:main'
+          image: 'ghcr.io/fuddin-bit/gpu-pruner:774e0a1'
           args:
             - 'gpu-pruner'
             - '-d'
