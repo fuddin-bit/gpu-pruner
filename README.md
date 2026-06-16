@@ -10,6 +10,47 @@ An [example set of k8s deployment manifests](./gpu-pruner/hack/kustomization.yam
 
 [prebuilt images](https://github.com/wseaton/gpu-pruner/pkgs/container/gpu-pruner) based on the Dockerfiles in the repository are published to ghcr.io.
 
+## How It Works
+
+```mermaid
+flowchart TD
+    A[Start GPU Pruner] --> B[Query Prometheus<br/>for GPU Metrics]
+    
+    B --> C[Find Idle GPUs<br/>Low Utilization > 30min]
+    
+    C --> D[Identify Pod's<br/>Parent Resource]
+    
+    D --> E{Is Workload<br/>Acknowledged?}
+    
+    E -->|Yes| F[Skip - Don't Scale]
+    E -->|No| G{Slack Enabled?}
+    
+    G -->|Yes| H[Send Slack Alert<br/>Wait for Ack]
+    G -->|No| I{Run Mode?}
+    
+    H --> J{User Clicked<br/>Acknowledge?}
+    J -->|Yes| F
+    J -->|No - Timeout| I
+    
+    I -->|Dry-Run| K[Log Only]
+    I -->|Scale-Down| L[Scale to 0 Replicas]
+    
+    L --> M[Free Up GPU]
+    K --> N{Daemon Mode?}
+    M --> N
+    F --> N
+    
+    N -->|Yes| O[Wait & Repeat]
+    N -->|No| P[Exit]
+    
+    O --> B
+    
+    style A fill:#90EE90
+    style L fill:#FF6B6B
+    style H fill:#87CEEB
+    style M fill:#98FB98
+```
+
 ## background
 
 The background for `gpu-pruner` is that in certain environments it is very easy for cluster users to request GPUs and then (either accidentally or not accidentally) not consume GPU resources. We needed a method to proactively identify this type of use, and scale down workloads that are idle from the GPU hardware perspective, compared to the default for `Notebook` resources which is web activity. It is totally possible for a user to consume a GPU from a pod PoV but never actually run a workload on it!
