@@ -43,6 +43,17 @@ pub struct AckStatus {
     pub by_user: Option<String>,
 }
 
+pub const PENDING_SCALE_ANNOTATION: &str = "gpu-pruner.io/pending-scale-at";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingScaleStatus {
+    NotPending,
+    InGrace {
+        until: chrono::DateTime<chrono::Utc>,
+    },
+    GraceExpired,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub enum ScaleKind {
     Deployment(Deployment),
@@ -225,12 +236,8 @@ pub trait Meta {
 }
 
 pub trait Scaler {
-    fn scale(
-        &self,
-        client: Client,
-        slack_notifier: Option<slack::SlackNotifier>,
-        idle_duration_minutes: i64,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    fn scale(&self, client: Client)
+    -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 
     fn generate_scale_event(&self) -> anyhow::Result<Event>;
 }
@@ -367,13 +374,8 @@ impl Meta for ScaleKind {
 }
 
 impl Scaler for ScaleKind {
-    #[tracing::instrument(skip(self, client, slack_notifier))]
-    async fn scale(
-        &self,
-        client: Client,
-        slack_notifier: Option<slack::SlackNotifier>,
-        idle_duration_minutes: i64,
-    ) -> anyhow::Result<()> {
+    #[tracing::instrument(skip(self, client))]
+    async fn scale(&self, client: Client) -> anyhow::Result<()> {
         if let Some(ns) = self.namespace() {
             let event = self.generate_scale_event()?;
             let events_api: Api<Event> = Api::namespaced(client.clone(), &ns);
@@ -383,26 +385,13 @@ impl Scaler for ScaleKind {
             } else {
                 tracing::debug!("Emitted scale event for: {:?}", event.involved_object);
             }
-
-            // Send Slack notification if configured
-            if let Some(notifier) = slack_notifier {
-                match notifier
-                    .send_notification(self, idle_duration_minutes)
-                    .await
-                {
-                    Ok(_) => {
-                        metrics::SLACK_NOTIFICATIONS_SENT.inc();
-                    }
-                    Err(e) => {
-                        metrics::SLACK_NOTIFICATION_FAILURES.inc();
-                        tracing::error!("Failed to send Slack notification: {e}");
-                        // Continue with scale-down even if notification fails
-                    }
-                }
-            }
         };
 
-        match self {
+        let kind = self.kind();
+        let name = self.name();
+        let namespace = self.namespace();
+
+        let result = match self {
             ScaleKind::Deployment(d) => {
                 let api: Api<Deployment> =
                     Api::namespaced(client.clone(), &d.namespace().expect("No namespace!"));
@@ -436,7 +425,19 @@ impl Scaler for ScaleKind {
                 .await?;
                 Ok(())
             }
+        };
+
+        if result.is_ok()
+            && let Some(ns) = namespace
+        {
+            if let Err(e) = clear_pending_scale_at(client, &kind, &name, &ns).await {
+                tracing::warn!(
+                    "Failed to clear pending-scale annotation for [{kind}] {ns}:{name}: {e}"
+                );
+            }
         }
+
+        result
     }
 
     #[tracing::instrument(skip(self))]
@@ -493,58 +494,173 @@ pub async fn acknowledge_workload(
 ) -> anyhow::Result<()> {
     use chrono::Duration;
 
-    // Calculate expiry timestamp
     let now = chrono::Utc::now();
     let expires_at = now + Duration::hours(duration_hours as i64);
     let expires_at_rfc3339 = expires_at.to_rfc3339();
 
-    // Build annotation patch
     let patch = serde_json::json!({
         "metadata": {
             "annotations": {
                 "gpu-pruner.io/ack-until": expires_at_rfc3339,
                 "gpu-pruner.io/ack-by": user,
+                PENDING_SCALE_ANNOTATION: null,
             }
         }
     });
 
-    // Apply patch based on resource kind
+    patch_workload(client, kind, name, namespace, &patch).await?;
+
+    metrics::ACKNOWLEDGMENTS_TOTAL.inc();
+
+    tracing::info!("Acknowledged [{kind}] {namespace}:{name} by {user} until {expires_at_rfc3339}");
+
+    Ok(())
+}
+
+fn workload_annotations(
+    workload: &ScaleKind,
+) -> Option<std::collections::BTreeMap<String, String>> {
+    match workload {
+        ScaleKind::Deployment(d) => d.metadata.annotations.clone(),
+        ScaleKind::ReplicaSet(r) => r.metadata.annotations.clone(),
+        ScaleKind::StatefulSet(s) => s.metadata.annotations.clone(),
+        ScaleKind::Notebook(n) => n.metadata.annotations.clone(),
+        ScaleKind::InferenceService(i) => i.metadata.annotations.clone(),
+    }
+}
+
+/// Evaluate whether a workload is in the Slack ack grace period.
+pub fn check_pending_grace(workload: &ScaleKind, grace_secs: u64) -> PendingScaleStatus {
+    use chrono::{DateTime, Duration, Utc};
+
+    let annotations = match workload_annotations(workload) {
+        Some(a) => a,
+        None => return PendingScaleStatus::NotPending,
+    };
+
+    let pending_str = match annotations.get(PENDING_SCALE_ANNOTATION) {
+        Some(s) => s,
+        None => return PendingScaleStatus::NotPending,
+    };
+
+    let pending_at = match DateTime::parse_from_rfc3339(pending_str) {
+        Ok(dt) => dt.with_timezone(&Utc),
+        Err(_) => return PendingScaleStatus::NotPending,
+    };
+
+    let grace_end = pending_at + Duration::seconds(grace_secs as i64);
+    if Utc::now() < grace_end {
+        PendingScaleStatus::InGrace { until: grace_end }
+    } else {
+        PendingScaleStatus::GraceExpired
+    }
+}
+
+#[tracing::instrument(skip(client))]
+pub async fn set_pending_scale_at(
+    client: KubeClient,
+    kind: &str,
+    name: &str,
+    namespace: &str,
+) -> anyhow::Result<()> {
+    let pending_at = chrono::Utc::now().to_rfc3339();
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                PENDING_SCALE_ANNOTATION: pending_at,
+            }
+        }
+    });
+    patch_workload(client, kind, name, namespace, &patch).await
+}
+
+#[tracing::instrument(skip(client))]
+pub async fn clear_pending_scale_at(
+    client: KubeClient,
+    kind: &str,
+    name: &str,
+    namespace: &str,
+) -> anyhow::Result<()> {
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                PENDING_SCALE_ANNOTATION: null,
+            }
+        }
+    });
+    patch_workload(client, kind, name, namespace, &patch).await
+}
+
+#[tracing::instrument(skip(client))]
+pub async fn fetch_workload(
+    client: KubeClient,
+    kind: &str,
+    name: &str,
+    namespace: &str,
+) -> anyhow::Result<ScaleKind> {
     match kind {
         "Deployment" => {
             let api: Api<Deployment> = Api::namespaced(client, namespace);
-            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            Ok(ScaleKind::Deployment(api.get(name).await?))
+        }
+        "ReplicaSet" => {
+            let api: Api<ReplicaSet> = Api::namespaced(client, namespace);
+            Ok(ScaleKind::ReplicaSet(api.get(name).await?))
+        }
+        "StatefulSet" => {
+            let api: Api<StatefulSet> = Api::namespaced(client, namespace);
+            Ok(ScaleKind::StatefulSet(api.get(name).await?))
+        }
+        "Notebook" => {
+            let api: Api<Notebook> = Api::namespaced(client, namespace);
+            Ok(ScaleKind::Notebook(api.get(name).await?))
+        }
+        "InferenceService" => {
+            let api: Api<InferenceService> = Api::namespaced(client, namespace);
+            Ok(ScaleKind::InferenceService(Box::new(api.get(name).await?)))
+        }
+        _ => Err(anyhow::anyhow!("Unsupported resource kind: {}", kind)),
+    }
+}
+
+#[tracing::instrument(skip(client))]
+async fn patch_workload(
+    client: KubeClient,
+    kind: &str,
+    name: &str,
+    namespace: &str,
+    patch: &serde_json::Value,
+) -> anyhow::Result<()> {
+    match kind {
+        "Deployment" => {
+            let api: Api<Deployment> = Api::namespaced(client, namespace);
+            api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
         }
         "ReplicaSet" => {
             let api: Api<ReplicaSet> = Api::namespaced(client, namespace);
-            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
         }
         "StatefulSet" => {
             let api: Api<StatefulSet> = Api::namespaced(client, namespace);
-            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
         }
         "Notebook" => {
             let api: Api<Notebook> = Api::namespaced(client, namespace);
-            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
         }
         "InferenceService" => {
             let api: Api<InferenceService> = Api::namespaced(client, namespace);
-            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
         }
         _ => {
             return Err(anyhow::anyhow!("Unsupported resource kind: {}", kind));
         }
     }
-
-    // Increment metrics
-    metrics::ACKNOWLEDGMENTS_TOTAL.inc();
-
-    tracing::info!("Acknowledged [{kind}] {namespace}:{name} by {user} until {expires_at_rfc3339}");
-
     Ok(())
 }
 

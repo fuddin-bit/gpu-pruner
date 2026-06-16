@@ -39,9 +39,10 @@ use kube::{Api, Client as KubeClient, Resource};
 use clap::{Parser, ValueEnum};
 
 use gpu_pruner::{
-    Meta, PodMetricData, QueryResponse, RootObjectError, ScaleKind, Scaler, TlsMode,
-    acknowledge_workload, check_acknowledgment, find_root_object, get_enabled_resources,
-    get_prom_client, get_prometheus_token, slack::SlackNotifier,
+    Meta, PendingScaleStatus, PodMetricData, QueryResponse, RootObjectError, ScaleKind, Scaler,
+    TlsMode, acknowledge_workload, check_acknowledgment, check_pending_grace,
+    clear_pending_scale_at, fetch_workload, find_root_object, get_enabled_resources,
+    get_prom_client, get_prometheus_token, set_pending_scale_at, slack::SlackNotifier,
 };
 
 use axum::{
@@ -150,6 +151,10 @@ struct Cli {
     /// Required if you want users to acknowledge idle GPUs from Slack messages.
     #[clap(long)]
     slack_interaction_port: Option<u16>,
+
+    /// Seconds to wait after Slack notification before scaling down (Slack only).
+    #[clap(long, default_value = "300")]
+    ack_grace_period: u64,
 }
 
 #[derive(Debug, Clone, ValueEnum, Default, Serialize)]
@@ -547,6 +552,7 @@ async fn main() -> anyhow::Result<()> {
 
     let query_task = {
         let args = args.clone();
+        let slack_notifier = slack_notifier.clone();
         tokio::spawn(async move {
             let mut interval =
                 time::interval(tokio::time::Duration::from_secs(args.check_interval));
@@ -556,7 +562,15 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let client = build_prom_client(&args).await;
-                match run_query_and_scale(client, query.clone(), &args, tx.clone()).await {
+                match run_query_and_scale(
+                    client,
+                    query.clone(),
+                    &args,
+                    slack_notifier.clone(),
+                    tx.clone(),
+                )
+                .await
+                {
                     Ok(qr) => {
                         QUERY_FAILURES.store(0, std::sync::atomic::Ordering::Relaxed);
                         gpu_pruner::metrics::QUERY_SUCCESSES.inc();
@@ -597,8 +611,6 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let scale_down_task = {
-        let slack_notifier = slack_notifier.clone();
-        let duration = args.duration;
         tokio::spawn(async move {
             let kube_client = KubeClient::try_default()
                 .await
@@ -614,8 +626,7 @@ async fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
-                let notifier = slack_notifier.as_ref().map(|n| (**n).clone());
-                if let Err(e) = sk.scale(kube_client.clone(), notifier, duration).await {
+                if let Err(e) = sk.scale(kube_client.clone()).await {
                     gpu_pruner::metrics::SCALE_FAILURES.inc();
                     tracing::error!(
                         monotonic_counter.scale_failures = 1,
@@ -731,6 +742,7 @@ async fn run_query_and_scale(
     client: Client,
     query: String,
     args: &Cli,
+    slack_notifier: Option<Arc<SlackNotifier>>,
     tx: Sender<ScaleKind>,
 ) -> anyhow::Result<QueryResponse> {
     let response = match client.query(query).get().await {
@@ -902,51 +914,155 @@ async fn run_query_and_scale(
 
     gpu_pruner::metrics::ACKNOWLEDGED_WORKLOADS.set(acknowledged_count as i64);
 
-    // Filter out acknowledged workloads before scaling
-    futures::stream::iter(workloads_with_ack)
-        .filter_map(|(obj, ack_status)| async move {
-            // Skip acknowledged workloads
-            if let Some(ack) = &ack_status
-                && ack.acknowledged
-            {
-                tracing::info!(
-                    "Skipping [{}] {}:{} - acknowledged until {} by {}",
-                    obj.kind(),
-                    obj.namespace().unwrap_or_default(),
-                    obj.name(),
-                    ack.expires_at.as_ref().unwrap_or(&"unknown".to_string()),
-                    ack.by_user.as_ref().unwrap_or(&"unknown".to_string())
-                );
-                gpu_pruner::metrics::SCALEDOWNS_PREVENTED_TOTAL.inc();
-                return None;
-            }
+    let slack_grace_enabled = slack_notifier.is_some() && args.ack_grace_period > 0;
 
-            // Apply dry-run filter
-            if let Mode::DryRun = args.run_mode {
-                tracing::info!(
-                    "Dry-run: Would have sent [{}] {}:{} for scaledown",
-                    obj.kind(),
-                    obj.namespace().unwrap_or_default(),
-                    obj.name()
-                );
-                None
-            } else {
-                Some(obj)
-            }
-        })
-        .for_each_concurrent(None, |obj| async {
+    for (obj, ack_status) in workloads_with_ack {
+        if ack_status.as_ref().is_some_and(|a| a.acknowledged) {
+            let ack = ack_status.as_ref().unwrap();
             tracing::info!(
-                "Sending [{}] {}:{} for scaledown",
+                "Skipping [{}] {}:{} - acknowledged until {} by {}",
                 obj.kind(),
                 obj.namespace().unwrap_or_default(),
-                obj.name()
+                obj.name(),
+                ack.expires_at.as_ref().unwrap_or(&"unknown".to_string()),
+                ack.by_user.as_ref().unwrap_or(&"unknown".to_string())
             );
+            gpu_pruner::metrics::SCALEDOWNS_PREVENTED_TOTAL.inc();
+            continue;
+        }
 
-            if let Err(e) = tx.send(obj).await {
-                tracing::error!("Failed to send object for scaledown: {:?}", e);
+        let kind = obj.kind();
+        let name = obj.name();
+        let namespace = obj.namespace().unwrap_or_else(|| "default".to_string());
+
+        if slack_grace_enabled {
+            match check_pending_grace(&obj, args.ack_grace_period) {
+                PendingScaleStatus::NotPending => {
+                    if matches!(args.run_mode, Mode::DryRun) {
+                        tracing::info!(
+                            "Dry-run: Would notify [{}] {}:{} and wait {}s before scale-down",
+                            kind,
+                            namespace,
+                            name,
+                            args.ack_grace_period
+                        );
+                        continue;
+                    }
+
+                    if let Some(notifier) = slack_notifier.as_ref() {
+                        match notifier
+                            .send_notification(&obj, args.duration, args.ack_grace_period)
+                            .await
+                        {
+                            Ok(_) => gpu_pruner::metrics::SLACK_NOTIFICATIONS_SENT.inc(),
+                            Err(e) => {
+                                gpu_pruner::metrics::SLACK_NOTIFICATION_FAILURES.inc();
+                                tracing::error!("Failed to send Slack notification: {e}");
+                            }
+                        }
+                    }
+
+                    if let Err(e) =
+                        set_pending_scale_at(kube_client.clone(), &kind, &name, &namespace).await
+                    {
+                        tracing::error!(
+                            "Failed to set pending-scale annotation for [{kind}] {namespace}:{name}: {e}"
+                        );
+                    } else {
+                        tracing::info!(
+                            "Started {}s ack grace period for [{kind}] {namespace}:{name}",
+                            args.ack_grace_period
+                        );
+                    }
+                    continue;
+                }
+                PendingScaleStatus::InGrace { until } => {
+                    tracing::info!(
+                        "Skipping [{}] {}:{} - ack grace period until {}",
+                        kind,
+                        namespace,
+                        name,
+                        until.to_rfc3339()
+                    );
+                    continue;
+                }
+                PendingScaleStatus::GraceExpired => {
+                    let scale_obj = match fetch_workload(
+                        kube_client.clone(),
+                        &kind,
+                        &name,
+                        &namespace,
+                    )
+                    .await
+                    {
+                        Ok(fresh) => fresh,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to re-fetch [{kind}] {namespace}:{name}, using cached object: {e}"
+                            );
+                            obj.clone()
+                        }
+                    };
+
+                    if check_acknowledgment(kube_client.clone(), &scale_obj)
+                        .await
+                        .is_ok_and(|a| a.acknowledged)
+                    {
+                        tracing::info!(
+                            "Skipping [{}] {}:{} - acknowledged during grace period",
+                            kind,
+                            namespace,
+                            name
+                        );
+                        gpu_pruner::metrics::SCALEDOWNS_PREVENTED_TOTAL.inc();
+                        let _ =
+                            clear_pending_scale_at(kube_client.clone(), &kind, &name, &namespace)
+                                .await;
+                        continue;
+                    }
+
+                    if matches!(args.run_mode, Mode::DryRun) {
+                        tracing::info!(
+                            "Dry-run: Would scale [{}] {}:{} after grace period expired",
+                            kind,
+                            namespace,
+                            name
+                        );
+                        continue;
+                    }
+
+                    let _ =
+                        clear_pending_scale_at(kube_client.clone(), &kind, &name, &namespace).await;
+
+                    tracing::info!(
+                        "Sending [{}] {}:{} for scaledown after grace period expired",
+                        kind,
+                        namespace,
+                        name
+                    );
+                    if let Err(e) = tx.send(scale_obj).await {
+                        tracing::error!("Failed to send object for scaledown: {:?}", e);
+                    }
+                    continue;
+                }
             }
-        })
-        .await;
+        }
+
+        if matches!(args.run_mode, Mode::DryRun) {
+            tracing::info!(
+                "Dry-run: Would have sent [{}] {}:{} for scaledown",
+                kind,
+                namespace,
+                name
+            );
+            continue;
+        }
+
+        tracing::info!("Sending [{}] {}:{} for scaledown", kind, namespace, name);
+        if let Err(e) = tx.send(obj).await {
+            tracing::error!("Failed to send object for scaledown: {:?}", e);
+        }
+    }
 
     Ok(QueryResponse {
         num_pods,

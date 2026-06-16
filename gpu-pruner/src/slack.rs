@@ -30,12 +30,20 @@ impl SlackNotifier {
         &self,
         workload: &T,
         idle_duration_minutes: i64,
+        ack_grace_period_secs: u64,
     ) -> Result<()> {
         let resource_type = workload.kind();
         let resource_name = workload.name();
         let namespace = workload
             .namespace()
             .unwrap_or_else(|| "default".to_string());
+
+        let grace_minutes = ack_grace_period_secs / 60;
+        let grace_label = if ack_grace_period_secs % 60 == 0 && grace_minutes > 0 {
+            format!("{grace_minutes} minutes")
+        } else {
+            format!("{ack_grace_period_secs} seconds")
+        };
 
         // Encode workload info in button values: kind:namespace:name:duration
         let button_value_4h = format!("{}:{}:{}:4", resource_type, namespace, resource_name);
@@ -47,7 +55,7 @@ impl SlackNotifier {
             "attachments": [{
                 "callback_id": "ack_idle_gpu",
                 "color": "warning",
-                "title": "🔔 Idle GPU Detected - Scale Down Pending",
+                "title": "Idle GPU Detected",
                 "fields": [
                     {
                         "title": "Resource",
@@ -66,7 +74,7 @@ impl SlackNotifier {
                     },
                     {
                         "title": "Action",
-                        "value": "Scaling to 0 replicas unless acknowledged",
+                        "value": format!("You have {grace_label} to acknowledge before scale-down"),
                         "short": false
                     }
                 ],

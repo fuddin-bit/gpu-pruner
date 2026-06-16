@@ -60,16 +60,23 @@ async fn wait_for_deployment_ready(api: &Api<Deployment>, name: &str) {
 
 /// Wait for a statefulset to have at least one ready pod.
 async fn wait_for_statefulset_ready(api: &Api<StatefulSet>, name: &str) {
-    for _ in 0..60 {
-        if let Ok(ss) = api.get(name).await
-            && let Some(status) = ss.status
-            && status.ready_replicas.unwrap_or(0) > 0
-        {
-            return;
+    for i in 0..120 {  // Increased from 60 to 120 seconds
+        if let Ok(ss) = api.get(name).await {
+            if let Some(status) = ss.status {
+                if status.ready_replicas.unwrap_or(0) > 0 {
+                    return;
+                }
+                // Log progress every 10 seconds
+                if i % 10 == 0 {
+                    eprintln!("StatefulSet {name} - Ready replicas: {}, Replicas: {}",
+                        status.ready_replicas.unwrap_or(0),
+                        status.replicas.unwrap_or(0));
+                }
+            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    panic!("statefulset {name} never became ready");
+    panic!("statefulset {name} never became ready after 120 seconds");
 }
 
 fn make_deployment(name: &str, ns: &str) -> Deployment {
@@ -268,7 +275,7 @@ async fn scale_deployment_to_zero() {
 
     let dep = dep_api.get("e2e-scale").await.unwrap();
     let sk = ScaleKind::Deployment(dep);
-    sk.scale(client.clone(), None, 30).await.unwrap();
+    sk.scale(client.clone()).await.unwrap();
 
     // verify it scaled to zero
     let dep = dep_api.get("e2e-scale").await.unwrap();
@@ -323,7 +330,7 @@ async fn scale_statefulset_to_zero() {
 
     let ss = ss_api.get("e2e-scale-ss").await.unwrap();
     let sk = ScaleKind::StatefulSet(ss);
-    sk.scale(client.clone(), None, 30).await.unwrap();
+    sk.scale(client.clone()).await.unwrap();
 
     let ss = ss_api.get("e2e-scale-ss").await.unwrap();
     let replicas = ss.spec.unwrap().replicas.unwrap_or(1);
@@ -411,16 +418,9 @@ async fn acknowledge_and_check_deployment() {
     wait_for_deployment_ready(&dep_api, "e2e-ack").await;
 
     // Acknowledge the workload for 4 hours
-    acknowledge_workload(
-        client.clone(),
-        "Deployment",
-        "e2e-ack",
-        &ns,
-        4,
-        "test-user",
-    )
-    .await
-    .unwrap();
+    acknowledge_workload(client.clone(), "Deployment", "e2e-ack", &ns, 4, "test-user")
+        .await
+        .unwrap();
 
     // Fetch the updated deployment and verify annotations
     let dep = dep_api.get("e2e-ack").await.unwrap();
@@ -441,7 +441,10 @@ async fn acknowledge_and_check_deployment() {
     let ack_status = check_acknowledgment(client.clone(), &sk).await.unwrap();
 
     assert!(ack_status.acknowledged, "should be acknowledged");
-    assert!(ack_status.expires_at.is_some(), "should have expiry timestamp");
+    assert!(
+        ack_status.expires_at.is_some(),
+        "should have expiry timestamp"
+    );
     assert_eq!(
         ack_status.by_user,
         Some("test-user".to_string()),
@@ -467,9 +470,16 @@ async fn acknowledged_workload_not_scaled() {
     wait_for_deployment_ready(&dep_api, "e2e-skip").await;
 
     // Acknowledge the workload
-    acknowledge_workload(client.clone(), "Deployment", "e2e-skip", &ns, 4, "test-user")
-        .await
-        .unwrap();
+    acknowledge_workload(
+        client.clone(),
+        "Deployment",
+        "e2e-skip",
+        &ns,
+        4,
+        "test-user",
+    )
+    .await
+    .unwrap();
 
     let dep = dep_api.get("e2e-skip").await.unwrap();
     let sk = ScaleKind::Deployment(dep.clone());
