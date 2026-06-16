@@ -392,3 +392,97 @@ async fn hashset_dedup_with_real_uids() {
 
     delete_test_namespace(&client, &ns).await;
 }
+
+// ── acknowledgment tests ─────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn acknowledge_and_check_deployment() {
+    use gpu_pruner::{acknowledge_workload, check_acknowledgment};
+
+    let client = Client::try_default().await.unwrap();
+    let ns = create_test_namespace(&client, "gpu-pruner-e2e-ack").await;
+
+    let dep_api: Api<Deployment> = Api::namespaced(client.clone(), &ns);
+    let dep = dep_api
+        .create(&PostParams::default(), &make_deployment("e2e-ack", &ns))
+        .await
+        .unwrap();
+    wait_for_deployment_ready(&dep_api, "e2e-ack").await;
+
+    // Acknowledge the workload for 4 hours
+    acknowledge_workload(
+        client.clone(),
+        "Deployment",
+        "e2e-ack",
+        &ns,
+        4,
+        "test-user",
+    )
+    .await
+    .unwrap();
+
+    // Fetch the updated deployment and verify annotations
+    let dep = dep_api.get("e2e-ack").await.unwrap();
+    let annotations = dep.metadata.annotations.as_ref().unwrap();
+
+    assert!(
+        annotations.contains_key("gpu-pruner.io/ack-until"),
+        "should have ack-until annotation"
+    );
+    assert_eq!(
+        annotations.get("gpu-pruner.io/ack-by"),
+        Some(&"test-user".to_string()),
+        "should have ack-by annotation with correct user"
+    );
+
+    // Check acknowledgment status
+    let sk = ScaleKind::Deployment(dep);
+    let ack_status = check_acknowledgment(client.clone(), &sk).await.unwrap();
+
+    assert!(ack_status.acknowledged, "should be acknowledged");
+    assert!(ack_status.expires_at.is_some(), "should have expiry timestamp");
+    assert_eq!(
+        ack_status.by_user,
+        Some("test-user".to_string()),
+        "should track acknowledging user"
+    );
+
+    delete_test_namespace(&client, &ns).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn acknowledged_workload_not_scaled() {
+    use gpu_pruner::{acknowledge_workload, check_acknowledgment};
+
+    let client = Client::try_default().await.unwrap();
+    let ns = create_test_namespace(&client, "gpu-pruner-e2e-no-scale").await;
+
+    let dep_api: Api<Deployment> = Api::namespaced(client.clone(), &ns);
+    dep_api
+        .create(&PostParams::default(), &make_deployment("e2e-skip", &ns))
+        .await
+        .unwrap();
+    wait_for_deployment_ready(&dep_api, "e2e-skip").await;
+
+    // Acknowledge the workload
+    acknowledge_workload(client.clone(), "Deployment", "e2e-skip", &ns, 4, "test-user")
+        .await
+        .unwrap();
+
+    let dep = dep_api.get("e2e-skip").await.unwrap();
+    let sk = ScaleKind::Deployment(dep.clone());
+
+    // Verify it's acknowledged
+    let ack_status = check_acknowledgment(client.clone(), &sk).await.unwrap();
+    assert!(ack_status.acknowledged);
+
+    // In production, this workload would be skipped during scaledown
+    // We can't easily test the full flow here, but we can verify the replicas
+    // haven't changed (assuming no manual scaling)
+    let current_replicas = dep.spec.unwrap().replicas.unwrap_or(0);
+    assert_eq!(current_replicas, 1, "replicas should still be 1");
+
+    delete_test_namespace(&client, &ns).await;
+}

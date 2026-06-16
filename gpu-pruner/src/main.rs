@@ -192,7 +192,12 @@ struct SlackInteractionPayload {
 
 #[derive(Debug, serde::Deserialize)]
 struct SlackUser {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
     name: String,
+    #[serde(default)]
+    username: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -269,7 +274,14 @@ async fn handle_slack_interaction(
         }
     };
 
-    let user = &payload.user.name;
+    // Get user identifier - prefer name, fallback to username, then id
+    let user = if !payload.user.name.is_empty() {
+        &payload.user.name
+    } else if !payload.user.username.is_empty() {
+        &payload.user.username
+    } else {
+        &payload.user.id
+    };
 
     // Apply acknowledgment
     match acknowledge_workload(

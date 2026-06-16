@@ -1,0 +1,10 @@
+FROM fedora:latest
+
+# Copy the pre-built binary from local machine
+# Build context is gpu-pruner/ so path is target/release/gpu-pruner
+COPY ../target/release/gpu-pruner /usr/local/bin/gpu-pruner
+
+# Make it executable
+RUN chmod +x /usr/local/bin/gpu-pruner
+
+CMD ["gpu-pruner"]
