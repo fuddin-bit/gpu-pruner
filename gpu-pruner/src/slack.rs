@@ -39,7 +39,7 @@ impl SlackNotifier {
             .unwrap_or_else(|| "default".to_string());
 
         let grace_minutes = ack_grace_period_secs / 60;
-        let grace_label = if ack_grace_period_secs % 60 == 0 && grace_minutes > 0 {
+        let grace_label = if ack_grace_period_secs.is_multiple_of(60) && grace_minutes > 0 {
             format!("{grace_minutes} minutes")
         } else {
             format!("{ack_grace_period_secs} seconds")

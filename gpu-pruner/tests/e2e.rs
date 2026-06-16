@@ -78,19 +78,19 @@ async fn wait_for_deployment_ready(api: &Api<Deployment>, name: &str) {
 async fn wait_for_statefulset_ready(api: &Api<StatefulSet>, name: &str) {
     for i in 0..120 {
         // Increased from 60 to 120 seconds
-        if let Ok(ss) = api.get(name).await {
-            if let Some(status) = ss.status {
-                if status.ready_replicas.unwrap_or(0) > 0 {
-                    return;
-                }
-                // Log progress every 10 seconds
-                if i % 10 == 0 {
-                    eprintln!(
-                        "StatefulSet {name} - Ready replicas: {}, Replicas: {}",
-                        status.ready_replicas.unwrap_or(0),
-                        status.replicas
-                    );
-                }
+        if let Ok(ss) = api.get(name).await
+            && let Some(status) = ss.status
+        {
+            if status.ready_replicas.unwrap_or(0) > 0 {
+                return;
+            }
+            // Log progress every 10 seconds
+            if i % 10 == 0 {
+                eprintln!(
+                    "StatefulSet {name} - Ready replicas: {}, Replicas: {}",
+                    status.ready_replicas.unwrap_or(0),
+                    status.replicas
+                );
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

@@ -429,12 +429,11 @@ impl Scaler for ScaleKind {
 
         if result.is_ok()
             && let Some(ns) = namespace
+            && let Err(e) = clear_pending_scale_at(client, &kind, &name, &ns).await
         {
-            if let Err(e) = clear_pending_scale_at(client, &kind, &name, &ns).await {
-                tracing::warn!(
-                    "Failed to clear pending-scale annotation for [{kind}] {ns}:{name}: {e}"
-                );
-            }
+            tracing::warn!(
+                "Failed to clear pending-scale annotation for [{kind}] {ns}:{name}: {e}"
+            );
         }
 
         result
