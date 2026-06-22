@@ -10,6 +10,8 @@ An [example set of k8s deployment manifests](./gpu-pruner/hack/kustomization.yam
 
 [prebuilt images](https://github.com/wseaton/gpu-pruner/pkgs/container/gpu-pruner) based on the Dockerfiles in the repository are published to ghcr.io.
 
+
+
 ## How It Works
 
 ```mermaid
@@ -51,6 +53,8 @@ flowchart TD
     style M fill:#98FB98
 ```
 
+
+
 ## background
 
 The background for `gpu-pruner` is that in certain environments it is very easy for cluster users to request GPUs and then (either accidentally or not accidentally) not consume GPU resources. We needed a method to proactively identify this type of use, and scale down workloads that are idle from the GPU hardware perspective, compared to the default for `Notebook` resources which is web activity. It is totally possible for a user to consume a GPU from a pod PoV but never actually run a workload on it!
@@ -62,12 +66,14 @@ This culler politely pauses workloads that appear idle by scaling them down to 0
 **NEW**: Prevent unwanted scale-downs by acknowledging workloads that are intentionally idle.
 
 Users can acknowledge idle workloads via the web dashboard to prevent gpu-pruner from scaling them down. Use cases:
+
 - Loading large datasets
 - Model warm-up / compilation
 - Interactive debugging sessions
 - Scheduled batch jobs with intermittent GPU usage
 
 **Quick Start:**
+
 1. Open the web dashboard: `http://dashboard-url:8080`
 2. Enter your email address
 3. Click **4h**, **8h**, or **24h** buttons next to idle workloads
@@ -84,6 +90,7 @@ The gpu-pruner includes both a **web dashboard** and a **Grafana dashboard** for
 Real-time web interface for monitoring GPU workloads. See [DASHBOARD.md](DASHBOARD.md) for setup instructions.
 
 Features:
+
 - Real-time monitoring of idle GPU workloads
 - **Acknowledgment system** - prevent scale-downs with duration-based acknowledgments
 - Resource usage statistics
@@ -109,7 +116,7 @@ Import `gpu-dashboard.json` into Grafana for advanced analytics and visualizatio
 
 **Live updates after scale-down:** Running GPU Workloads and idle workload panels use kube-state-metrics and filter to pods that still request GPUs, so scaled-down workloads disappear within about one to two minutes (kube-state-metrics + Prometheus scrape + dashboard refresh). The 30-minute idle **detection window** is unchanged and still matches gpu-pruner logic; only live visibility of terminated workloads improves.
 
-**gpu-pruner metrics:** gpu-pruner exposes Prometheus metrics on port **8080** at `/metrics` (including `gpu_pruner_scales_total`, `gpu_pruner_idle_gpus`, and scale success counters). Configure a `ServiceMonitor` so your Prometheus instance scrapes the gpu-pruner Service—see [`gpu-pruner/hack/servicemonitor.yaml`](gpu-pruner/hack/servicemonitor.yaml) or the [`user-namespace` overlay](gpu-pruner/hack/overlays/user-namespace/) for namespace-scoped deploys.
+**gpu-pruner metrics:** gpu-pruner exposes Prometheus metrics on port **8080** at `/metrics` (including `gpu_pruner_scales_total`, `gpu_pruner_idle_gpus`, and scale success counters). Configure a `ServiceMonitor` so your Prometheus instance scrapes the gpu-pruner Service—see `[gpu-pruner/hack/servicemonitor.yaml](gpu-pruner/hack/servicemonitor.yaml)` or the `[user-namespace` overlay](gpu-pruner/hack/overlays/user-namespace/) for namespace-scoped deploys.
 
 See [DASHBOARD.md](DASHBOARD.md) for import instructions and [IDLE_GPU_QUERY.md](IDLE_GPU_QUERY.md) for querying idle GPU time by deployment.
 
@@ -132,7 +139,7 @@ helm install gpu-grafana grafana/grafana \
 
 See [GRAFANA_DEPLOYMENT.md](GRAFANA_DEPLOYMENT.md) for complete deployment instructions, configuration options, and troubleshooting.
 
-## usage 
+## usage
 
 ```sh
 Usage: gpu-pruner [OPTIONS] --prometheus-url <PROMETHEUS_URL>
@@ -160,6 +167,7 @@ Options:
 
   -n, --namespace <NAMESPACE>
           namespace to use for search filter, is passed down to prometheus as a pattern match
+          note: namespaces under bench-guide-* and llm-d-nightly-* are excluded from pruning
 
   -g, --grace-period <GRACE_PERIOD>
           Seconds of grace period to allow for metrics to be published
@@ -193,7 +201,6 @@ Options:
   -h, --help
           Print help (see a summary with '-h')
 ```
-
 
 ## OTEL via OTLP
 

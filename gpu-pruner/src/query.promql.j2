@@ -5,16 +5,19 @@
 {%- set pl = "pod" if args.honor_labels else "exported_pod" -%}
 {%- set nl = "namespace" if args.honor_labels else "exported_namespace" -%}
 {%- set cl = "container" if args.honor_labels else "exported_container" -%}
+{%- set excluded_namespaces = "(llm-d-nightly-.*|bench-guide-.*)" -%}
 {%- set idle_gpus -%}
 sum by (Hostname, {{ cl }}, {{ pl }}, {{ nl }}, gpu, modelName) (
     max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{
       {{ pl }} != ""
+      , {{ nl }} !~ "{{ excluded_namespaces }}"
       {%- if args.namespace %}, {{ nl }} =~ "{{ args.namespace }}"{%endif%}
       {%- if args.model_name %}, modelName =~ "{{ args.model_name }}"{%endif%}
     }[{{ args.duration }}m])
     or
     max_over_time(DCGM_FI_DEV_GPU_UTIL{
       {{ pl }} != ""
+      , {{ nl }} !~ "{{ excluded_namespaces }}"
       {%- if args.namespace %}, {{ nl }} =~ "{{ args.namespace }}"{%endif%}
       {%- if args.model_name %}, modelName =~ "{{ args.model_name }}"{%endif%}
     }[{{ args.duration }}m]) / 100
@@ -38,6 +41,7 @@ unless on ({{ pl }}, {{ nl }})
 (
   max_over_time(DCGM_FI_DEV_POWER_USAGE{
     {{ pl }} != ""
+    , {{ nl }} !~ "{{ excluded_namespaces }}"
     {%- if args.namespace %}, {{ nl }} =~ "{{ args.namespace }}"{%endif%}
   }[{{ args.duration }}m]) >= {{ args.power_threshold }}
 )

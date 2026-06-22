@@ -1162,6 +1162,28 @@ mod tests {
     }
 
     #[test]
+    fn query_excludes_protected_namespaces() {
+        let query = render(json!({ "duration": 30 }));
+        let pattern = r#"!~ "(llm-d-nightly|bench-guide-.*)""#;
+        assert_eq!(
+            query.matches(pattern).count(),
+            4,
+            "exclude filter should appear in all compute metric selectors"
+        );
+    }
+
+    #[test]
+    fn query_excludes_protected_namespaces_with_power_threshold() {
+        let query = render(json!({ "duration": 30, "power_threshold": 150.0 }));
+        let pattern = r#"!~ "(llm-d-nightly|bench-guide-.*)""#;
+        assert_eq!(
+            query.matches(pattern).count(),
+            5,
+            "exclude filter should appear in compute and power metric selectors"
+        );
+    }
+
+    #[test]
     fn query_with_namespace_filter() {
         let query = render(json!({ "duration": 15, "namespace": "ml-team" }));
         let count = query.matches("exported_namespace =~ \"ml-team\"").count();
