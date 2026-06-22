@@ -1164,7 +1164,7 @@ mod tests {
     #[test]
     fn query_excludes_protected_namespaces() {
         let query = render(json!({ "duration": 30 }));
-        let pattern = r#"!~ "(llm-d-nightly|bench-guide-.*)""#;
+        let pattern = r#"!~ "(llm-d-nightly-.*|bench-guide-.*)""#;
         assert_eq!(
             query.matches(pattern).count(),
             4,
@@ -1175,7 +1175,7 @@ mod tests {
     #[test]
     fn query_excludes_protected_namespaces_with_power_threshold() {
         let query = render(json!({ "duration": 30, "power_threshold": 150.0 }));
-        let pattern = r#"!~ "(llm-d-nightly|bench-guide-.*)""#;
+        let pattern = r#"!~ "(llm-d-nightly-.*|bench-guide-.*)""#;
         assert_eq!(
             query.matches(pattern).count(),
             5,
