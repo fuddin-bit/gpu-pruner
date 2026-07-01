@@ -36,6 +36,12 @@ spec:
                   name: gpu-pruner-slack-webhook
                   key: webhook-url
                   optional: true
+            - name: SLACK_NAMESPACE_MENTIONS
+              valueFrom:
+                secretKeyRef:
+                  name: gpu-pruner-config
+                  key: namespace-mentions
+                  optional: true
           ports:
             - containerPort: 8080
               name: dashboard

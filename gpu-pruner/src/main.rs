@@ -155,6 +155,13 @@ struct Cli {
     /// Seconds to wait after Slack notification before scaling down (Slack only).
     #[clap(long, default_value = "300")]
     ack_grace_period: u64,
+
+    /// Namespace-to-Slack-mention mapping as JSON. Can also be set via SLACK_NAMESPACE_MENTIONS env var.
+    /// Format: {"namespace": "<@USER_ID>", "prefix-": "<@USER_ID>"}
+    /// Example: {"fuddin-dev":"<@U123>","alice-":"<@UALICE>"}
+    /// Supports exact namespace matching and prefix matching (e.g., "alice-" matches alice-dev, alice-prod).
+    #[clap(long)]
+    slack_namespace_mentions: Option<String>,
 }
 
 #[derive(Debug, Clone, ValueEnum, Default, Serialize)]
@@ -544,6 +551,31 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Slack notifications disabled (no webhook URL configured)");
     }
 
+    // Initialize namespace mention mapper if configured
+    let namespace_mention_mapper = args
+        .slack_namespace_mentions
+        .clone()
+        .or_else(|| std::env::var("SLACK_NAMESPACE_MENTIONS").ok())
+        .and_then(|json_str| {
+            match gpu_pruner::NamespaceMentionMapper::from_json(&json_str) {
+                Ok(mapper) => {
+                    tracing::info!(
+                        "Namespace mention mapping enabled with {} entries",
+                        mapper.mappings.len()
+                    );
+                    Some(Arc::new(mapper))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse namespace mention mapping JSON: {}", e);
+                    None
+                }
+            }
+        });
+
+    if namespace_mention_mapper.is_none() && slack_notifier.is_some() {
+        tracing::info!("Namespace mention mapping not configured - will only use annotation-based mentions");
+    }
+
     let env: Environment = Environment::new();
     let query = env.render_str(include_str!("query.promql.j2"), context! { args })?;
     tracing::info!("Running w/ Query: {query}");
@@ -553,6 +585,7 @@ async fn main() -> anyhow::Result<()> {
     let query_task = {
         let args = args.clone();
         let slack_notifier = slack_notifier.clone();
+        let namespace_mention_mapper = namespace_mention_mapper.clone();
         tokio::spawn(async move {
             let mut interval =
                 time::interval(tokio::time::Duration::from_secs(args.check_interval));
@@ -567,6 +600,7 @@ async fn main() -> anyhow::Result<()> {
                     query.clone(),
                     &args,
                     slack_notifier.clone(),
+                    namespace_mention_mapper.clone(),
                     tx.clone(),
                 )
                 .await
@@ -743,6 +777,7 @@ async fn run_query_and_scale(
     query: String,
     args: &Cli,
     slack_notifier: Option<Arc<SlackNotifier>>,
+    namespace_mention_mapper: Option<Arc<gpu_pruner::NamespaceMentionMapper>>,
     tx: Sender<ScaleKind>,
 ) -> anyhow::Result<QueryResponse> {
     let response = match client.query(query).get().await {
@@ -950,8 +985,11 @@ async fn run_query_and_scale(
                     }
 
                     if let Some(notifier) = slack_notifier.as_ref() {
-                        // Extract mentions from workload annotations
-                        let mentions = gpu_pruner::get_slack_mentions(&obj);
+                        // Extract mentions from workload annotations or namespace mapping
+                        let mentions = gpu_pruner::get_slack_mentions(
+                            &obj,
+                            namespace_mention_mapper.as_deref(),
+                        );
 
                         match notifier
                             .send_notification(&obj, args.duration, args.ack_grace_period, mentions)

@@ -15,6 +15,7 @@ use resources::{inferenceservice::InferenceService, notebook::Notebook};
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     hash::{Hash, Hasher},
     path::Path,
 };
@@ -41,6 +42,39 @@ pub struct AckStatus {
     pub acknowledged: bool,
     pub expires_at: Option<String>,
     pub by_user: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NamespaceMentionMapper {
+    pub mappings: HashMap<String, String>,
+}
+
+impl NamespaceMentionMapper {
+    pub fn new(mappings: HashMap<String, String>) -> Self {
+        Self { mappings }
+    }
+
+    pub fn from_json(json_str: &str) -> Result<Self, serde_json::Error> {
+        let mappings: HashMap<String, String> = serde_json::from_str(json_str)?;
+        Ok(Self::new(mappings))
+    }
+
+    pub fn get_mentions(&self, namespace: &str) -> Option<String> {
+        // Try exact match first
+        if let Some(mentions) = self.mappings.get(namespace) {
+            return Some(mentions.clone());
+        }
+
+        // Try prefix match (extract before first '-')
+        if let Some(prefix) = namespace.split('-').next() {
+            let prefix_key = format!("{}-", prefix);
+            if let Some(mentions) = self.mappings.get(&prefix_key) {
+                return Some(mentions.clone());
+            }
+        }
+
+        None
+    }
 }
 
 pub const PENDING_SCALE_ANNOTATION: &str = "gpu-pruner.io/pending-scale-at";
@@ -528,16 +562,55 @@ fn workload_annotations(
     }
 }
 
-/// Extract Slack mentions from workload annotations.
+/// Extract Slack mentions for a workload.
 ///
-/// Returns the value of the `gpu-pruner.io/slack-mentions` annotation if present.
-/// The annotation should contain space-separated Slack mention syntax:
+/// Precedence order:
+/// 1. Annotation `gpu-pruner.io/slack-mentions` on the workload (highest priority)
+/// 2. Exact namespace match in the mapper
+/// 3. Prefix match in the mapper (namespace prefix before first '-')
+/// 4. None (no mention)
+///
+/// The mention should contain space-separated Slack mention syntax:
 /// - User mentions: `<@U123456789>`
 /// - User group mentions: `<!subteam^S123456789>`
 /// - Channel-wide mentions: `<!channel>` or `<!here>`
-pub fn get_slack_mentions(workload: &ScaleKind) -> Option<String> {
-    let annotations = workload_annotations(workload)?;
-    annotations.get("gpu-pruner.io/slack-mentions").cloned()
+pub fn get_slack_mentions(
+    workload: &ScaleKind,
+    mapper: Option<&NamespaceMentionMapper>,
+) -> Option<String> {
+    // First, check annotation (highest priority)
+    if let Some(annotations) = workload_annotations(workload) {
+        if let Some(mentions) = annotations.get("gpu-pruner.io/slack-mentions") {
+            tracing::debug!(
+                "Using Slack mentions from annotation for {}:{}",
+                workload.kind(),
+                workload.name()
+            );
+            return Some(mentions.clone());
+        }
+    }
+
+    // Second, check namespace mapping
+    if let Some(mapper) = mapper {
+        if let Some(namespace) = workload.namespace() {
+            if let Some(mentions) = mapper.get_mentions(&namespace) {
+                tracing::debug!(
+                    "Using Slack mentions from namespace mapping for {}:{} (namespace: {})",
+                    workload.kind(),
+                    workload.name(),
+                    namespace
+                );
+                return Some(mentions);
+            }
+        }
+    }
+
+    tracing::debug!(
+        "No Slack mentions found for {}:{}",
+        workload.kind(),
+        workload.name()
+    );
+    None
 }
 
 /// Evaluate whether a workload is in the Slack ack grace period.
