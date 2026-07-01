@@ -79,6 +79,20 @@ Users can acknowledge idle workloads via the web dashboard to prevent gpu-pruner
 3. Click **4h**, **8h**, or **24h** buttons next to idle workloads
 4. Acknowledged workloads won't be scaled down until the acknowledgment expires
 
+**Slack Mentions:**
+
+Get notified directly when your workloads are idle by adding a mention annotation:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    gpu-pruner.io/slack-mentions: "<@U123456789>"
+```
+
+When gpu-pruner detects idle GPUs, mentioned users will receive direct Slack notifications. Supports user mentions (`<@USER_ID>`), usergroup mentions (`<!subteam^GROUP_ID>`), and channel-wide mentions (`<!channel>` or `<!here>`). Find your Slack user ID via: Profile → More → Copy member ID.
+
 See [ACKNOWLEDGMENT_GUIDE.md](ACKNOWLEDGMENT_GUIDE.md) for complete documentation, API usage, and troubleshooting.
 
 ## Dashboard

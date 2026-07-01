@@ -31,6 +31,7 @@ impl SlackNotifier {
         workload: &T,
         idle_duration_minutes: i64,
         ack_grace_period_secs: u64,
+        mentions: Option<String>,
     ) -> Result<()> {
         let resource_type = workload.kind();
         let resource_name = workload.name();
@@ -50,7 +51,7 @@ impl SlackNotifier {
         let button_value_8h = format!("{}:{}:{}:8", resource_type, namespace, resource_name);
         let button_value_24h = format!("{}:{}:{}:24", resource_type, namespace, resource_name);
 
-        let payload = json!({
+        let mut payload = json!({
             "channel": self.channel,
             "attachments": [{
                 "callback_id": "ack_idle_gpu",
@@ -108,6 +109,11 @@ impl SlackNotifier {
                     .as_secs()
             }]
         });
+
+        // Add mentions to the text field if provided
+        if let Some(mention_text) = mentions {
+            payload["text"] = json!(mention_text);
+        }
 
         tracing::debug!("Sending Slack notification payload: {:?}", payload);
 

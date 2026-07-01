@@ -950,8 +950,11 @@ async fn run_query_and_scale(
                     }
 
                     if let Some(notifier) = slack_notifier.as_ref() {
+                        // Extract mentions from workload annotations
+                        let mentions = gpu_pruner::get_slack_mentions(&obj);
+
                         match notifier
-                            .send_notification(&obj, args.duration, args.ack_grace_period)
+                            .send_notification(&obj, args.duration, args.ack_grace_period, mentions)
                             .await
                         {
                             Ok(_) => gpu_pruner::metrics::SLACK_NOTIFICATIONS_SENT.inc(),

@@ -528,6 +528,18 @@ fn workload_annotations(
     }
 }
 
+/// Extract Slack mentions from workload annotations.
+///
+/// Returns the value of the `gpu-pruner.io/slack-mentions` annotation if present.
+/// The annotation should contain space-separated Slack mention syntax:
+/// - User mentions: `<@U123456789>`
+/// - User group mentions: `<!subteam^S123456789>`
+/// - Channel-wide mentions: `<!channel>` or `<!here>`
+pub fn get_slack_mentions(workload: &ScaleKind) -> Option<String> {
+    let annotations = workload_annotations(workload)?;
+    annotations.get("gpu-pruner.io/slack-mentions").cloned()
+}
+
 /// Evaluate whether a workload is in the Slack ack grace period.
 pub fn check_pending_grace(workload: &ScaleKind, grace_secs: u64) -> PendingScaleStatus {
     use chrono::{DateTime, Duration, Utc};
