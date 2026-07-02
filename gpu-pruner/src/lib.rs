@@ -183,10 +183,6 @@ bitflags! {
 ///
 /// Unknown characters are silently ignored.
 pub fn get_enabled_resources(enabled_resources: &str) -> ResourceKind {
-    if enabled_resources.is_empty() {
-        return ResourceKind::all();
-    }
-
     let mut resource_kind = ResourceKind::empty();
     for c in enabled_resources.chars() {
         match c {
@@ -199,11 +195,11 @@ pub fn get_enabled_resources(enabled_resources: &str) -> ResourceKind {
             _ => {}
         }
     }
-    // Auto-enable LeaderWorkerSet whenever any resources are enabled
-    if !resource_kind.is_empty() {
-        resource_kind |= ResourceKind::LEADER_WORKER_SET;
+    if resource_kind.is_empty() {
+        ResourceKind::all()
+    } else {
+        resource_kind | ResourceKind::LEADER_WORKER_SET
     }
-    resource_kind
 }
 
 pub struct QueryResponse {
@@ -611,30 +607,29 @@ pub fn get_slack_mentions(
     mapper: Option<&NamespaceMentionMapper>,
 ) -> Option<String> {
     // First, check annotation (highest priority)
-    if let Some(annotations) = workload_annotations(workload) {
-        if let Some(mentions) = annotations.get("gpu-pruner.io/slack-mentions") {
-            tracing::debug!(
-                "Using Slack mentions from annotation for {}:{}",
-                workload.kind(),
-                workload.name()
-            );
-            return Some(mentions.clone());
-        }
+    if let Some(annotations) = workload_annotations(workload)
+        && let Some(mentions) = annotations.get("gpu-pruner.io/slack-mentions")
+    {
+        tracing::debug!(
+            "Using Slack mentions from annotation for {}:{}",
+            workload.kind(),
+            workload.name()
+        );
+        return Some(mentions.clone());
     }
 
     // Second, check namespace mapping
-    if let Some(mapper) = mapper {
-        if let Some(namespace) = workload.namespace() {
-            if let Some(mentions) = mapper.get_mentions(&namespace) {
-                tracing::debug!(
-                    "Using Slack mentions from namespace mapping for {}:{} (namespace: {})",
-                    workload.kind(),
-                    workload.name(),
-                    namespace
-                );
-                return Some(mentions);
-            }
-        }
+    if let Some(mapper) = mapper
+        && let Some(namespace) = workload.namespace()
+        && let Some(mentions) = mapper.get_mentions(&namespace)
+    {
+        tracing::debug!(
+            "Using Slack mentions from namespace mapping for {}:{} (namespace: {})",
+            workload.kind(),
+            workload.name(),
+            namespace
+        );
+        return Some(mentions);
     }
 
     tracing::debug!(
