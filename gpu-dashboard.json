@@ -372,7 +372,7 @@
     },
     {
       "title": "VRAM free (FB=0)",
-      "description": "GPUs with no framebuffer in use. PromQL: count(DCGM_FI_DEV_FB_USED == 0). Equals Total \u2212 VRAM allocated (FB>0).",
+      "description": "GPUs with no framebuffer in use. PromQL: count(DCGM_FI_DEV_FB_USED == 0). Equals Total − VRAM allocated (FB>0).",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -459,7 +459,7 @@
     },
     {
       "title": "Engine active (30m)",
-      "description": "GPUs with \u2265 1% engine activity at least once in 30m. Uses DCGM_FI_PROF_GR_ENGINE_ACTIVE or DCGM_FI_DEV_GPU_UTIL fallback. Equals Total \u2212 Engine idle (30m).",
+      "description": "GPUs with ≥ 1% engine activity at least once in 30m. Uses DCGM_FI_PROF_GR_ENGINE_ACTIVE or DCGM_FI_DEV_GPU_UTIL fallback. Equals Total − Engine idle (30m).",
       "type": "stat",
       "gridPos": {
         "h": 4,
@@ -835,7 +835,7 @@
     },
     {
       "title": "Idle GPU Time by Deployment (30m)",
-      "description": "Deployments producing the most allocated GPU idle time at 0% utilization. Sorted by total idle GPU-hours (GPU count \u00d7 30min window). Uses kube_pod_labels when available; otherwise derives deployment name from pod name.",
+      "description": "Deployments producing the most allocated GPU idle time at 0% utilization. Sorted by total idle GPU-hours (GPU count × 30min window). Uses kube_pod_labels when available; otherwise derives deployment name from pod name.",
       "type": "table",
       "gridPos": {
         "h": 10,
@@ -978,7 +978,7 @@
     },
     {
       "title": "GPU Memory Allocation Leaderboard (GiB)",
-      "description": "Estimated GPU memory allocated per namespace. Calculated as GPUs requested \u00d7 140 GiB (H200 FB total).",
+      "description": "Estimated GPU memory allocated per namespace. Calculated as GPUs requested × 140 GiB (H200 FB total).",
       "type": "barchart",
       "gridPos": {
         "h": 10,
@@ -1075,7 +1075,7 @@
       "targets": [
         {
           "expr": "max(DCGM_FI_DEV_GPU_TEMP)",
-          "legendFormat": "Max \u00b0C"
+          "legendFormat": "Max °C"
         }
       ],
       "fieldConfig": {
@@ -1388,7 +1388,7 @@
     },
     {
       "title": "Graphics/compute engine active by node",
-      "description": "Average graphics/compute engine activity (DCGM_FI_PROF_GR_ENGINE_ACTIVE, 0\u20131). Primary metric for idle detection in gpu-pruner and engine idle/active overview stats.",
+      "description": "Average graphics/compute engine activity (DCGM_FI_PROF_GR_ENGINE_ACTIVE, 0–1). Primary metric for idle detection in gpu-pruner and engine idle/active overview stats.",
       "type": "timeseries",
       "gridPos": {
         "h": 6,
@@ -1520,6 +1520,268 @@
             "spanNulls": true
           }
         }
+      }
+    },
+    {
+      "title": "GPU Leaderboard",
+      "type": "row",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 126
+      },
+      "collapsed": false
+    },
+    {
+      "title": "Idle GPU Hours (7 Days)",
+      "description": "Total GPU hours where utilization < 1% over the past 7 days, grouped by namespace. Higher values indicate more GPU waste.",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 127
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (namespace, pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace!~\"llm-d-nightly-.*|bench-guide-.*|cw-.*\"} < 0.01)[7d:1m]) / 60))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 500
+              }
+            ]
+          },
+          "unit": "none",
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exported_namespace"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Namespace"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Idle Hours"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Value"
+          }
+        ]
+      }
+    },
+    {
+      "title": "Utilized GPU Hours (7 Days)",
+      "description": "Total GPU hours where utilization >= 1% over the past 7 days, grouped by namespace. Higher values indicate more actual GPU usage.",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 127
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (namespace, pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace!~\"llm-d-nightly-.*|bench-guide-.*|cw-.*\"} >= 0.01)[7d:1m]) / 60))",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "displayMode": "auto"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "green",
+                "value": 500
+              }
+            ]
+          },
+          "unit": "none",
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exported_namespace"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Namespace"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Utilized Hours"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Value"
+          }
+        ]
+      }
+    },
+    {
+      "title": "GPU Efficiency (7 Days)",
+      "description": "Efficiency percentage: utilized hours / (utilized + idle hours) * 100. Higher is better.",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 135
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "sum by (namespace) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace!~\"llm-d-nightly-.*|bench-guide-.*|cw-.*\"} >= 0.01)[7d:1m])) / sum by (namespace) (count_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace!~\"llm-d-nightly-.*|bench-guide-.*|cw-.*\"}[7d:1m])) * 100",
+          "format": "time_series",
+          "instant": true,
+          "legendFormat": "{{exported_namespace}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 25
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 75
+              }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "text": {}
       }
     }
   ],
