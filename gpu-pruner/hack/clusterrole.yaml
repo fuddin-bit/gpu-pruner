@@ -57,4 +57,19 @@ rules:
       - patch
       - delete
     apiGroups:
+      - serving.kserve.io
+    resources:
       - inferenceservices
+  - verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+    apiGroups:
+      - leaderworkerset.x-k8s.io
+    resources:
+      - leaderworkersets
+      - leaderworkersets/scale

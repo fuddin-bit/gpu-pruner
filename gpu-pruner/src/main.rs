@@ -76,7 +76,9 @@ struct Cli {
     /// - `s` for StatefulSet
     /// - `i` for InferenceService
     /// - `n` for Notebook
-    #[clap(short, long, default_value = "drsin")]
+    ///
+    /// Note: LeaderWorkerSet is automatically enabled with any resource combination
+    #[clap(short, long, default_value = "drsinl")]
     enabled_resources: String,
 
     /// interval in seconds to check for idle pods, only used in daemon mode
@@ -556,8 +558,8 @@ async fn main() -> anyhow::Result<()> {
         .slack_namespace_mentions
         .clone()
         .or_else(|| std::env::var("SLACK_NAMESPACE_MENTIONS").ok())
-        .and_then(|json_str| {
-            match gpu_pruner::NamespaceMentionMapper::from_json(&json_str) {
+        .and_then(
+            |json_str| match gpu_pruner::NamespaceMentionMapper::from_json(&json_str) {
                 Ok(mapper) => {
                     tracing::info!(
                         "Namespace mention mapping enabled with {} entries",
@@ -569,11 +571,13 @@ async fn main() -> anyhow::Result<()> {
                     tracing::error!("Failed to parse namespace mention mapping JSON: {}", e);
                     None
                 }
-            }
-        });
+            },
+        );
 
     if namespace_mention_mapper.is_none() && slack_notifier.is_some() {
-        tracing::info!("Namespace mention mapping not configured - will only use annotation-based mentions");
+        tracing::info!(
+            "Namespace mention mapping not configured - will only use annotation-based mentions"
+        );
     }
 
     let env: Environment = Environment::new();
