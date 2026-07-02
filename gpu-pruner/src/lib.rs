@@ -908,6 +908,13 @@ pub async fn find_root_object(
                                 let nb = nb_api.get(&ss_or.name).await?;
 
                                 return Ok(ScaleKind::Notebook(nb));
+                            } else if ss_or.kind == "LeaderWorkerSet" {
+                                tracing::info!("Found LeaderWorkerSet owning StatefulSet!");
+                                let lws_api: Api<LeaderWorkerSet> =
+                                    Api::namespaced(client.clone(), &namespace);
+                                let lws = lws_api.get(&ss_or.name).await?;
+
+                                return Ok(ScaleKind::LeaderWorkerSet(lws));
                             }
                         }
                         // fallthrough, statefulset with no owners
