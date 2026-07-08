@@ -149,3 +149,35 @@ pub fn render() -> String {
     encoder.encode(&metric_families, &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap()
 }
+// Snapshot is a struct that contains the current state of the GPU pruner
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct Snapshot {
+    pub scale_successes: u64,
+    pub idle_workloads: i64,
+    pub pods_checked: i64,
+}
+
+pub fn snapshot() -> Snapshot {
+    Snapshot {
+        scale_successes: SCALE_SUCCESSES.get(),
+        idle_workloads: IDLE_GPUS.get(),
+        pods_checked: PODS_CHECKED.get(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_reads_registered_metrics() {
+        SCALE_SUCCESSES.inc();
+        IDLE_GPUS.set(3);
+        PODS_CHECKED.set(10);
+
+        let snap = snapshot();
+        assert!(snap.scale_successes >= 1);
+        assert_eq!(snap.idle_workloads, 3);
+        assert_eq!(snap.pods_checked, 10);
+    }
+}

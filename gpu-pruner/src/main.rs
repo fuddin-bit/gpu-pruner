@@ -40,9 +40,12 @@ use clap::{Parser, ValueEnum};
 
 use gpu_pruner::{
     Meta, PendingScaleStatus, PodMetricData, QueryResponse, RootObjectError, ScaleKind, Scaler,
-    TlsMode, acknowledge_workload, check_acknowledgment, check_pending_grace,
-    clear_pending_scale_at, fetch_workload, find_root_object, get_enabled_resources,
-    get_prom_client, get_prometheus_token, set_pending_scale_at, slack::SlackNotifier,
+    TlsMode, acknowledge_workload,
+    api::{self, AppState},
+    check_acknowledgment, check_pending_grace, clear_pending_scale_at, fetch_workload,
+    find_root_object, get_enabled_resources, get_prom_client, get_prometheus_token,
+    set_pending_scale_at,
+    slack::SlackNotifier,
 };
 
 use axum::{
@@ -53,6 +56,10 @@ use axum::{
     routing::{get, post},
 };
 use std::net::SocketAddr;
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::{ServeDir, ServeFile},
+};
 
 /// `gpu-pruner` is a tool to prune idle pods based on GPU utilization. It uses Prometheus to query
 /// GPU utilization metrics and scales down pods that have been idle for a certain duration.
@@ -584,6 +591,8 @@ async fn main() -> anyhow::Result<()> {
     let query = env.render_str(include_str!("query.promql.j2"), context! { args })?;
     tracing::info!("Running w/ Query: {query}");
 
+    let prom_client = Arc::new(build_prom_client(&args).await);
+
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ScaleKind>(100);
 
     let query_task = {
@@ -692,27 +701,56 @@ async fn main() -> anyhow::Result<()> {
         })
     };
 
-    // Prometheus metrics endpoint (port 8080)
-    let metrics_task = tokio::spawn(async move {
-        let app = Router::new().route(
-            "/metrics",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    gpu_pruner::metrics::render(),
+    // Dashboard, API, and Prometheus metrics endpoint (port 8080)
+    let metrics_task = {
+        let prom_client = prom_client.clone();
+        tokio::spawn(async move {
+            let web_dist = api::web_dist_dir();
+            let index_path = web_dist.join("index.html");
+            if web_dist.exists() {
+                tracing::info!("Serving dashboard from {}", web_dist.display());
+            } else {
+                tracing::warn!(
+                    "Dashboard static files not found at {} — API and /metrics still available",
+                    web_dist.display()
+                );
+            }
+            let serve_dir = ServeDir::new(&web_dist).not_found_service(ServeFile::new(index_path));
+
+            let app_state = AppState { prom_client };
+
+            let app = Router::new()
+                .route(
+                    "/metrics",
+                    get(|| async {
+                        (
+                            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                            gpu_pruner::metrics::render(),
+                        )
+                    }),
                 )
-            }),
-        );
-        let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-        tracing::info!("Starting metrics server on {}", addr);
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .expect("failed to bind metrics server");
-        axum::serve(listener, app)
-            .await
-            .expect("failed to start metrics server");
-        Ok::<(), anyhow::Error>(())
-    });
+                .route("/api/v1/summary", get(api::summary_handler))
+                .route("/api/v1/stats", get(api::stats_handler))
+                .fallback_service(serve_dir)
+                .layer(
+                    CorsLayer::new()
+                        .allow_origin(Any)
+                        .allow_methods(Any)
+                        .allow_headers(Any),
+                )
+                .with_state(app_state);
+
+            let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+            tracing::info!("Starting dashboard server on {}", addr);
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .expect("failed to bind dashboard server");
+            axum::serve(listener, app)
+                .await
+                .expect("failed to start dashboard server");
+            Ok::<(), anyhow::Error>(())
+        })
+    };
 
     // Spawn Slack interaction HTTP server if port is configured
     let slack_interaction_task = if let Some(port) = args.slack_interaction_port {
