@@ -4,7 +4,6 @@
 # Usage (with base deploy):
 #   kubectl apply -k gpu-pruner/hack/overlays/user-namespace
 #
-# Exposes Slack interactions and the web dashboard via CoreWeave LoadBalancer.
+# Exposes Slack interactions via CoreWeave LoadBalancer (not OpenShift Route).
 resources:
   - servicemonitor.yaml
-  - ../../dashboard-service-lb.yaml

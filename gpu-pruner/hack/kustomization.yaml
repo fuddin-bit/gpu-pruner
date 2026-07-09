@@ -5,6 +5,5 @@ resources:
 - serviceaccount.yaml
 - clusterrole.yaml
 - service.yaml
-- dashboard-service-lb.yaml
 - slack-interactions-service-lb.yaml
 - servicemonitor.yaml
