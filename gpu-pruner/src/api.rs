@@ -84,19 +84,21 @@ pub async fn summary_handler() -> Json<SummaryResponse> {
     Json(summary)
 }
 
-fn normalize_window(window: Option<String>) -> Result<String, Response> {
+fn normalize_window(window: Option<String>) -> Result<String, Box<Response>> {
     let window = window.unwrap_or_else(|| "7d".to_string());
     if ALLOWED_WINDOWS.contains(&window.as_str()) {
         Ok(window)
     } else {
-        Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid window",
-                "allowed": ALLOWED_WINDOWS,
-            })),
-        )
-            .into_response())
+        Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid window",
+                    "allowed": ALLOWED_WINDOWS,
+                })),
+            )
+                .into_response(),
+        ))
     }
 }
 
@@ -128,7 +130,7 @@ pub async fn stats_handler(
     State(state): State<AppState>,
     Query(query): Query<StatsQuery>,
 ) -> Result<Json<StatsResponse>, Response> {
-    let window = normalize_window(query.window)?;
+    let window = normalize_window(query.window).map_err(|e| *e)?;
     let snap = metrics::snapshot();
 
     let mut in_window = None;
@@ -210,7 +212,6 @@ mod tests {
             .await
             .unwrap();
         let summary: SummaryResponse = serde_json::from_slice(&body).unwrap();
-        assert!(summary.scale_downs.lifetime >= 0);
         assert_eq!(summary.idle_workloads.current, 2);
         assert_eq!(summary.pods_checked, 5);
     }
