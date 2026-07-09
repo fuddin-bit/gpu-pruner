@@ -165,6 +165,11 @@ export default defineConfig({
         },
       },
       "/metrics": GPU_PRUNER_URL,
+      "/prom": {
+        target: PROMETHEUS_URL,
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/prom/, ""),
+      },
     },
   },
 });

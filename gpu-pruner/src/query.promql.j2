@@ -5,11 +5,14 @@
 {%- set pl = "pod" if args.honor_labels else "exported_pod" -%}
 {%- set nl = "namespace" if args.honor_labels else "exported_namespace" -%}
 {%- set cl = "container" if args.honor_labels else "exported_container" -%}
-{%- set excluded_namespaces = "(llm-d-nightly-.*|bench-guide-.*)" -%}
+{#- Match dashboard exclusions: infra namespaces + DCGM exporter pods. -#}
+{%- set excluded_namespaces = "(llm-d-nightly-.*|bench-guide-.*|cw-.*)" -%}
+{%- set excluded_pods = "dcgm-exporter-.*" -%}
 {%- set idle_gpus -%}
 sum by (Hostname, {{ cl }}, {{ pl }}, {{ nl }}, gpu, modelName) (
     max_over_time(DCGM_FI_PROF_GR_ENGINE_ACTIVE{
       {{ pl }} != ""
+      , {{ pl }} !~ "{{ excluded_pods }}"
       , {{ nl }} !~ "{{ excluded_namespaces }}"
       {%- if args.namespace %}, {{ nl }} =~ "{{ args.namespace }}"{%endif%}
       {%- if args.model_name %}, modelName =~ "{{ args.model_name }}"{%endif%}
@@ -17,6 +20,7 @@ sum by (Hostname, {{ cl }}, {{ pl }}, {{ nl }}, gpu, modelName) (
     or
     max_over_time(DCGM_FI_DEV_GPU_UTIL{
       {{ pl }} != ""
+      , {{ pl }} !~ "{{ excluded_pods }}"
       , {{ nl }} !~ "{{ excluded_namespaces }}"
       {%- if args.namespace %}, {{ nl }} =~ "{{ args.namespace }}"{%endif%}
       {%- if args.model_name %}, modelName =~ "{{ args.model_name }}"{%endif%}
@@ -41,6 +45,7 @@ unless on ({{ pl }}, {{ nl }})
 (
   max_over_time(DCGM_FI_DEV_POWER_USAGE{
     {{ pl }} != ""
+    , {{ pl }} !~ "{{ excluded_pods }}"
     , {{ nl }} !~ "{{ excluded_namespaces }}"
     {%- if args.namespace %}, {{ nl }} =~ "{{ args.namespace }}"{%endif%}
   }[{{ args.duration }}m]) >= {{ args.power_threshold }}

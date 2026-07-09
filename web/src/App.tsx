@@ -5,6 +5,7 @@ import {
   PageSectionVariants,
   Title,
 } from "@patternfly/react-core";
+import { IdleGpuLeaderboard } from "./components/IdleGpuLeaderboard";
 import { StatsDashboard } from "./components/StatsDashboard";
 
 export default function App() {
@@ -20,6 +21,7 @@ export default function App() {
       </PageSection>
       <PageSection>
         <StatsDashboard />
+        <IdleGpuLeaderboard />
       </PageSection>
     </Page>
   );
