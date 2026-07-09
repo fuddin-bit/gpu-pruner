@@ -22,12 +22,6 @@ build-docker-non-otel:
 
 build-all : build-docker build-docker-non-otel
 
-web-dev:
-  cd web && npm run dev
-
-web-build:
-  cd web && npm ci && npm run build
-
 # ── testing ──────────────────────────────────────────────────────────
 
 test:
