@@ -22,7 +22,7 @@ spec:
             - '-d'
             - '--run-mode=scale-down'
             - '--prometheus-url=http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090'
-            - '--honor-labels'
+            - '--namespace=fuddin-dev'
             - '--slack-interaction-port=3002'
             - '--slack-channel=#test-pruner'
           env:
