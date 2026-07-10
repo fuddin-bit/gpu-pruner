@@ -16,13 +16,13 @@ spec:
       serviceAccountName: gpu-pruner
       containers:
         - name: container
-          image: 'ghcr.io/fuddin-bit/gpu-pruner:main'
+          image: 'ghcr.io/fuddin-bit/gpu-pruner:e2e9005'
           args:
             - 'gpu-pruner'
             - '-d'
             - '--run-mode=scale-down'
-            - '--prometheus-url=http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090'
             - '--honor-labels'
+            - '--prometheus-url=http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090'
             - '--slack-interaction-port=3002'
             - '--slack-channel=#test-pruner'
           env:
