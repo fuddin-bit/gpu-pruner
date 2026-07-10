@@ -21,7 +21,6 @@ spec:
             - 'gpu-pruner'
             - '-d'
             - '--run-mode=scale-down'
-            - '--honor-labels'
             - '--prometheus-url=http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090'
             - '--slack-interaction-port=3002'
             - '--slack-channel=#test-pruner'

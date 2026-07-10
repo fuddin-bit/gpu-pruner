@@ -337,7 +337,7 @@ pub fn get_prom_client<P: AsRef<Path>>(
     token: String,
     verify_tls: TlsMode,
     certfile: Option<P>,
-) -> anyhow::Result<PromClient> {
+) -> anyhow::Result<(PromClient, reqwest::Client)> {
     let mut r_client = reqwest::ClientBuilder::new();
 
     if let TlsMode::Skip = verify_tls {
@@ -369,9 +369,10 @@ pub fn get_prom_client<P: AsRef<Path>>(
 
     r_client = r_client.default_headers(header_map);
 
-    let res = PromClient::from(r_client.build()?, url)?;
+    let http_client = r_client.build()?;
+    let prom_client = PromClient::from(http_client.clone(), url)?;
 
-    Ok(res)
+    Ok((prom_client, http_client))
 }
 
 /// Dispatches a method call through every ScaleKind variant.

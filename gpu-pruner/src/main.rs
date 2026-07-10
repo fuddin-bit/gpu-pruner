@@ -591,7 +591,8 @@ async fn main() -> anyhow::Result<()> {
     let query = env.render_str(include_str!("query.promql.j2"), context! { args })?;
     tracing::info!("Running w/ Query: {query}");
 
-    let prom_client = Arc::new(build_prom_client(&args).await);
+    let (prom_client, http_client) = build_prom_client(&args).await;
+    let prom_client = Arc::new(prom_client);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ScaleKind>(100);
 
@@ -607,7 +608,7 @@ async fn main() -> anyhow::Result<()> {
                     interval.tick().await;
                 }
 
-                let client = build_prom_client(&args).await;
+                let (client, _) = build_prom_client(&args).await;
                 match run_query_and_scale(
                     client,
                     query.clone(),
@@ -704,6 +705,7 @@ async fn main() -> anyhow::Result<()> {
     // Dashboard, API, and Prometheus metrics endpoint (port 8080)
     let metrics_task = {
         let prom_client = prom_client.clone();
+        let prometheus_url = args.prometheus_url.clone();
         tokio::spawn(async move {
             let web_dist = api::web_dist_dir();
             let index_path = web_dist.join("index.html");
@@ -717,7 +719,11 @@ async fn main() -> anyhow::Result<()> {
             }
             let serve_dir = ServeDir::new(&web_dist).not_found_service(ServeFile::new(index_path));
 
-            let app_state = AppState { prom_client };
+            let app_state = AppState {
+                prom_client,
+                http_client,
+                prometheus_url,
+            };
 
             let app = Router::new()
                 .route(
@@ -731,6 +737,8 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .route("/api/v1/summary", get(api::summary_handler))
                 .route("/api/v1/stats", get(api::stats_handler))
+                .route("/prom/{*rest}", get(api::prom_proxy_handler))
+                .route("/prom", get(api::prom_proxy_handler))
                 .fallback_service(serve_dir)
                 .layer(
                     CorsLayer::new()
@@ -800,7 +808,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn build_prom_client(args: &Cli) -> Client {
+async fn build_prom_client(args: &Cli) -> (Client, reqwest::Client) {
     let token = get_prometheus_token()
         .await
         .expect("failed to get prometheus token");

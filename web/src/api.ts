@@ -59,11 +59,11 @@ export interface IdleGpuHoursResponse {
   updated_at: string;
 }
 
-// Waldorf DCGM scrape keeps workload identity on namespace/pod (honorLabels).
-// Kermit-style exported_* labels are absent here, so grouping on them yields
-// a single empty series that the UI correctly drops.
+// Kermit DCGM scrape keeps exporter identity on namespace/pod and the real
+// workload on exported_namespace/exported_pod. Waldorf (honorLabels) flips
+// that; use --honor-labels + the namespace/pod form of this query there.
 const IDLE_GPU_HOURS_QUERY =
-  'sort_desc(sum by (namespace, pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace!~"llm-d-nightly-.*|bench-guide-.*|cw-.*",pod!="",pod!~"dcgm-exporter-.*"} < 0.01)[7d:1m]) / 60))';
+  'sort_desc(sum by (exported_namespace, exported_pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_namespace!~"llm-d-nightly-.*|bench-guide-.*|cw-.*",exported_pod!="",exported_pod!~"dcgm-exporter-.*"} < 0.01)[7d:1m]) / 60))';
 
 const IDLE_GPU_HOURS_LIMIT = 25;
 

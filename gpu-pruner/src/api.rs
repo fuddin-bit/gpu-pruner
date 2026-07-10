@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Query, State},
-    http::StatusCode,
+    body::Body,
+    extract::{OriginalUri, Query, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use prometheus_http_query::{Client as PromClient, response::Data};
@@ -16,6 +17,8 @@ const ALLOWED_WINDOWS: &[&str] = &["1h", "7d", "30d"];
 #[derive(Clone)]
 pub struct AppState {
     pub prom_client: Arc<PromClient>,
+    pub http_client: reqwest::Client,
+    pub prometheus_url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,6 +162,68 @@ pub async fn stats_handler(
         pods_checked: snap.pods_checked,
         updated_at: now_rfc3339(),
     }))
+}
+
+/// Proxy `/prom/*` to the configured Prometheus URL (strips the `/prom` prefix).
+/// Used by the dashboard idle-GPU leaderboard so the browser never talks to Prometheus directly.
+pub async fn prom_proxy_handler(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    let path_and_query = uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/prom");
+    let stripped = path_and_query
+        .strip_prefix("/prom")
+        .unwrap_or(path_and_query);
+    let target = format!(
+        "{}{}",
+        state.prometheus_url.trim_end_matches('/'),
+        if stripped.is_empty() { "/" } else { stripped }
+    );
+
+    match state.http_client.get(&target).send().await {
+        Ok(upstream) => {
+            let status =
+                StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+            match upstream.bytes().await {
+                Ok(bytes) => {
+                    let mut builder = Response::builder().status(status);
+                    if let Some(ct) = content_type {
+                        builder = builder.header(header::CONTENT_TYPE, ct);
+                    }
+                    builder.body(Body::from(bytes)).unwrap_or_else(|e| {
+                        tracing::error!("Failed to build Prometheus proxy response: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read Prometheus proxy body: {e}");
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "status": "error",
+                            "error": "failed to read Prometheus response",
+                        })),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Prometheus proxy request failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": "failed to reach Prometheus",
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub fn web_dist_dir() -> std::path::PathBuf {

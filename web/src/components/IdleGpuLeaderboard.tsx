@@ -73,8 +73,8 @@ export function IdleGpuLeaderboard() {
             isInline
             style={{ marginBottom: "1rem" }}
           >
-            Could not query Waldorf Prometheus for idle GPU hours. Ensure
-            Prometheus is port-forwarded to localhost:9090.
+            Could not query Prometheus for idle GPU hours via /prom. Check
+            that the dashboard can reach the configured Prometheus URL.
           </Alert>
         )}
 
