@@ -16,6 +16,7 @@ const ALLOWED_WINDOWS: &[&str] = &["1h", "7d", "30d"];
 #[derive(Clone)]
 pub struct AppState {
     pub prom_client: Arc<PromClient>,
+    pub honor_labels: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,6 +160,110 @@ pub async fn stats_handler(
         pods_checked: snap.pods_checked,
         updated_at: now_rfc3339(),
     }))
+}
+
+const IDLE_GPU_HOURS_LIMIT: usize = 25;
+const EXCLUDED_NAMESPACES: &str = "llm-d-nightly-.*|bench-guide-.*|cw-.*";
+const EXCLUDED_PODS: &str = "dcgm-exporter-.*";
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdleGpuHoursEntry {
+    pub rank: usize,
+    pub namespace: String,
+    pub pod: String,
+    pub idle_hours: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdleGpuHoursResponse {
+    pub entries: Vec<IdleGpuHoursEntry>,
+    pub prometheus_available: bool,
+    pub updated_at: String,
+}
+
+fn idle_gpu_hours_query(honor_labels: bool) -> String {
+    let (ns_label, pod_label) = if honor_labels {
+        ("namespace", "pod")
+    } else {
+        ("exported_namespace", "exported_pod")
+    };
+
+    format!(
+        "sort_desc(sum by ({ns_label}, {pod_label}) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{{{ns_label}!~\"{EXCLUDED_NAMESPACES}\",{pod_label}!=\"\",{pod_label}!~\"{EXCLUDED_PODS}\"}} < 0.01)[7d:1m]) / 60))"
+    )
+}
+
+fn parse_idle_gpu_hours(data: &Data, honor_labels: bool) -> Vec<IdleGpuHoursEntry> {
+    let (ns_key, pod_key) = if honor_labels {
+        ("namespace", "pod")
+    } else {
+        ("exported_namespace", "exported_pod")
+    };
+
+    let Data::Vector(samples) = data else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    for sample in samples {
+        if entries.len() >= IDLE_GPU_HOURS_LIMIT {
+            break;
+        }
+
+        let metric = sample.metric();
+        let namespace = metric
+            .get(ns_key)
+            .or_else(|| metric.get("namespace"))
+            .or_else(|| metric.get("exported_namespace"))
+            .cloned();
+        let pod = metric
+            .get(pod_key)
+            .or_else(|| metric.get("pod"))
+            .or_else(|| metric.get("exported_pod"))
+            .cloned();
+
+        let (Some(namespace), Some(pod)) = (namespace, pod) else {
+            continue;
+        };
+        if namespace.is_empty() || pod.is_empty() {
+            continue;
+        }
+
+        let idle_hours = sample.sample().value();
+        if !idle_hours.is_finite() {
+            continue;
+        }
+
+        entries.push(IdleGpuHoursEntry {
+            rank: entries.len() + 1,
+            namespace,
+            pod,
+            idle_hours,
+        });
+    }
+
+    entries
+}
+
+pub async fn idle_gpu_hours_handler(State(state): State<AppState>) -> Json<IdleGpuHoursResponse> {
+    let updated_at = now_rfc3339();
+    let query = idle_gpu_hours_query(state.honor_labels);
+
+    match state.prom_client.query(query).get().await {
+        Ok(response) => Json(IdleGpuHoursResponse {
+            entries: parse_idle_gpu_hours(response.data(), state.honor_labels),
+            prometheus_available: true,
+            updated_at,
+        }),
+        Err(e) => {
+            tracing::warn!("Failed to query Prometheus for idle GPU hours: {e}");
+            Json(IdleGpuHoursResponse {
+                entries: Vec::new(),
+                prometheus_available: false,
+                updated_at,
+            })
+        }
+    }
 }
 
 pub fn web_dist_dir() -> std::path::PathBuf {

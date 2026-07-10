@@ -704,6 +704,7 @@ async fn main() -> anyhow::Result<()> {
     // Dashboard, API, and Prometheus metrics endpoint (port 8080)
     let metrics_task = {
         let prom_client = prom_client.clone();
+        let honor_labels = args.honor_labels;
         tokio::spawn(async move {
             let web_dist = api::web_dist_dir();
             let index_path = web_dist.join("index.html");
@@ -717,7 +718,10 @@ async fn main() -> anyhow::Result<()> {
             }
             let serve_dir = ServeDir::new(&web_dist).not_found_service(ServeFile::new(index_path));
 
-            let app_state = AppState { prom_client };
+            let app_state = AppState {
+                prom_client,
+                honor_labels,
+            };
 
             let app = Router::new()
                 .route(
@@ -731,6 +735,7 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .route("/api/v1/summary", get(api::summary_handler))
                 .route("/api/v1/stats", get(api::stats_handler))
+                .route("/api/v1/idle-gpu-hours", get(api::idle_gpu_hours_handler))
                 .fallback_service(serve_dir)
                 .layer(
                     CorsLayer::new()
