@@ -2,7 +2,7 @@ kind: Deployment
 apiVersion: apps/v1
 metadata:
   name: gpu-pruner
-  namespace: fuddin-dev
+  namespace: gpu-pruner-system
 spec:
   replicas: 1
   selector:
