@@ -27,6 +27,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub prometheus_url: String,
     pub clusters: HashMap<String, ClusterConfig>,
+    pub namespace: String,
+    pub pod_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -129,8 +131,12 @@ fn parse_prom_scalar(data: &Data) -> Option<f64> {
 async fn query_scale_downs_in_window(
     prom_client: &PromClient,
     window: &str,
+    namespace: &str,
+    pod_name: &str,
 ) -> anyhow::Result<u64> {
-    let query = format!("sum(increase(gpu_pruner_scale_successes_total[{window}]))");
+    let query = format!(
+        "sum(increase(gpu_pruner_scale_successes_total{{namespace=\"{namespace}\",pod=\"{pod_name}\"}}[{window}]))"
+    );
     let response = prom_client.query(query).get().await?;
     let value = parse_prom_scalar(response.data())
         .ok_or_else(|| anyhow::anyhow!("unexpected Prometheus response type"))?;
@@ -147,7 +153,7 @@ pub async fn stats_handler(
     let mut in_window = None;
     let mut prometheus_available = false;
 
-    match query_scale_downs_in_window(&state.prom_client, &window).await {
+    match query_scale_downs_in_window(&state.prom_client, &window, &state.namespace, &state.pod_name).await {
         Ok(count) => {
             in_window = Some(count);
             prometheus_available = true;

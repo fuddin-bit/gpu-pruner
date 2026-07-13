@@ -740,11 +740,20 @@ async fn main() -> anyhow::Result<()> {
             }
             let serve_dir = ServeDir::new(&web_dist).not_found_service(ServeFile::new(index_path));
 
+            let namespace = std::fs::read_to_string(
+                "/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+            )
+            .unwrap_or_else(|_| "gpu-pruner-system".to_string());
+
+            let pod_name = std::env::var("HOSTNAME").unwrap_or_default();
+
             let app_state = AppState {
                 prom_client,
                 http_client,
                 prometheus_url,
                 clusters,
+                namespace,
+                pod_name,
             };
 
             let app = Router::new()
