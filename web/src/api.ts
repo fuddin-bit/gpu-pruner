@@ -70,10 +70,10 @@ export interface IdleGpuHoursResponse {
 }
 
 const IDLE_GPU_HOURS_QUERY_EXPORTED =
-  'sort_desc(sum by (exported_namespace, exported_pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_namespace!~"llm-d-nightly-.*|bench-guide-.*|cw-.*",exported_pod!="",exported_pod!~"dcgm-exporter-.*"} < 0.01)[7d:1m]) / 60))';
+  'sort_desc(sum by (exported_namespace, exported_pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_pod!="",exported_pod!~"dcgm-exporter-.*"} < 0.01)[7d:1m]) / 60))';
 
 const IDLE_GPU_HOURS_QUERY_HONOR =
-  'sort_desc(sum by (namespace, pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{namespace!~"llm-d-nightly-.*|bench-guide-.*|cw-.*",pod!="",pod!~"dcgm-exporter-.*"} < 0.01)[7d:1m]) / 60))';
+  'sort_desc(sum by (namespace, pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{pod!="",pod!~"dcgm-exporter-.*"} < 0.01)[7d:1m]) / 60))';
 
 const IDLE_GPU_HOURS_LIMIT = 25;
 
