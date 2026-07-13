@@ -216,12 +216,23 @@ async fn proxy_to_prometheus(http_client: &reqwest::Client, target: &str) -> Res
     }
 }
 
-/// Proxy `/prom/{cluster}/*` to the named cluster's Prometheus URL.
 pub async fn prom_cluster_proxy_handler(
     State(state): State<AppState>,
     Path(cluster): Path<String>,
     OriginalUri(uri): OriginalUri,
 ) -> Response {
+    prom_cluster_proxy(state, cluster, uri).await
+}
+
+pub async fn prom_cluster_proxy_handler_rest(
+    State(state): State<AppState>,
+    Path((cluster, _rest)): Path<(String, String)>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    prom_cluster_proxy(state, cluster, uri).await
+}
+
+async fn prom_cluster_proxy(state: AppState, cluster: String, uri: axum::http::Uri) -> Response {
     let config = match state.clusters.get(&cluster) {
         Some(c) => c,
         None => {
