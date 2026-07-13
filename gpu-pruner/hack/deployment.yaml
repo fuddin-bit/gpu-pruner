@@ -22,6 +22,7 @@ spec:
             - '-d'
             - '--run-mode=scale-down'
             - '--prometheus-url=http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090'
+            - '--honor-labels'
             - '--cluster=waldorf=http://llmd-kube-prometheus-stack-prometheus.llm-d-monitoring.svc.cluster.local:9090'
             - '--cluster=kermit=http://166.19.50.111:8080/prom/kermit'
             - '--honor-labels-clusters=waldorf'
