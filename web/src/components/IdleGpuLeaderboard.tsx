@@ -4,14 +4,23 @@ import {
   Card,
   CardBody,
   CardTitle,
+  FormGroup,
+  MenuToggle,
+  Select,
+  SelectList,
+  SelectOption,
   Skeleton,
 } from "@patternfly/react-core";
 import {
+  fetchAllClustersIdleGpuHours,
+  fetchClusters,
   fetchIdleGpuHours,
+  type ClusterInfo,
   type IdleGpuHoursResponse,
 } from "../api";
 
 const REFRESH_INTERVAL_MS = 30_000;
+const ALL_CLUSTERS = "__all__";
 
 function formatIdleHours(value: number): string {
   return value.toFixed(1);
@@ -26,14 +35,39 @@ function formatUpdatedAt(iso: string): string {
 }
 
 export function IdleGpuLeaderboard() {
+  const [clusters, setClusters] = useState<ClusterInfo[]>([]);
+  const [selectedCluster, setSelectedCluster] = useState<string>(ALL_CLUSTERS);
+  const [isClusterOpen, setIsClusterOpen] = useState(false);
   const [data, setData] = useState<IdleGpuHoursResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    fetchClusters()
+      .then((c) => {
+        setClusters(c);
+        if (c.length === 1) {
+          setSelectedCluster(c[0].name);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   const load = useCallback(async () => {
+    if (clusters.length === 0) return;
+
     try {
       setError(null);
-      const response = await fetchIdleGpuHours();
+      let response: IdleGpuHoursResponse;
+      if (selectedCluster === ALL_CLUSTERS) {
+        response = await fetchAllClustersIdleGpuHours(clusters);
+      } else {
+        const info = clusters.find((c) => c.name === selectedCluster);
+        response = await fetchIdleGpuHours(
+          selectedCluster,
+          info?.honor_labels ?? false,
+        );
+      }
       setData(response);
     } catch (err) {
       setError(
@@ -42,7 +76,7 @@ export function IdleGpuLeaderboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [clusters, selectedCluster]);
 
   useEffect(() => {
     setLoading(true);
@@ -55,6 +89,14 @@ export function IdleGpuLeaderboard() {
     }, REFRESH_INTERVAL_MS);
     return () => globalThis.clearInterval(timer);
   }, [load]);
+
+  const showClusterColumn =
+    selectedCluster === ALL_CLUSTERS && clusters.length > 1;
+
+  const clusterLabel =
+    selectedCluster === ALL_CLUSTERS
+      ? "All Clusters"
+      : selectedCluster;
 
   return (
     <Card style={{ marginTop: "1.5rem" }}>
@@ -73,8 +115,45 @@ export function IdleGpuLeaderboard() {
             isInline
             style={{ marginBottom: "1rem" }}
           >
-            Could not query Prometheus for idle GPU hours.
+            Could not query Prometheus for idle GPU hours. Check that the
+            dashboard can reach the configured Prometheus URL(s).
           </Alert>
+        )}
+
+        {clusters.length > 1 && (
+          <FormGroup label="Cluster" style={{ marginBottom: "1rem" }}>
+            <Select
+              selected={selectedCluster}
+              isOpen={isClusterOpen}
+              onOpenChange={(open) => setIsClusterOpen(open)}
+              onSelect={(_event, value) => {
+                if (value) {
+                  setSelectedCluster(value as string);
+                }
+                setIsClusterOpen(false);
+              }}
+              toggle={(toggleRef) => (
+                <MenuToggle
+                  ref={toggleRef}
+                  onClick={() => setIsClusterOpen((open) => !open)}
+                  isExpanded={isClusterOpen}
+                >
+                  {clusterLabel}
+                </MenuToggle>
+              )}
+            >
+              <SelectList>
+                <SelectOption key={ALL_CLUSTERS} value={ALL_CLUSTERS}>
+                  All Clusters
+                </SelectOption>
+                {clusters.map((c) => (
+                  <SelectOption key={c.name} value={c.name}>
+                    {c.name}
+                  </SelectOption>
+                ))}
+              </SelectList>
+            </Select>
+          </FormGroup>
         )}
 
         {loading ? (
@@ -93,6 +172,9 @@ export function IdleGpuLeaderboard() {
               <thead>
                 <tr style={{ textAlign: "left", borderBottom: "2px solid #d2d2d2" }}>
                   <th style={{ padding: "0.5rem 0.75rem" }}>Rank</th>
+                  {showClusterColumn && (
+                    <th style={{ padding: "0.5rem 0.75rem" }}>Cluster</th>
+                  )}
                   <th style={{ padding: "0.5rem 0.75rem" }}>Namespace</th>
                   <th style={{ padding: "0.5rem 0.75rem" }}>Pod</th>
                   <th style={{ padding: "0.5rem 0.75rem", textAlign: "right" }}>
@@ -103,10 +185,15 @@ export function IdleGpuLeaderboard() {
               <tbody>
                 {data.entries.map((entry) => (
                   <tr
-                    key={`${entry.namespace}/${entry.pod}`}
+                    key={`${entry.cluster}/${entry.namespace}/${entry.pod}`}
                     style={{ borderBottom: "1px solid #f0f0f0" }}
                   >
                     <td style={{ padding: "0.5rem 0.75rem" }}>{entry.rank}</td>
+                    {showClusterColumn && (
+                      <td style={{ padding: "0.5rem 0.75rem" }}>
+                        {entry.cluster}
+                      </td>
+                    )}
                     <td style={{ padding: "0.5rem 0.75rem" }}>
                       {entry.namespace}
                     </td>

@@ -8,6 +8,17 @@ const GPU_PRUNER_URL =
   process.env.GPU_PRUNER_METRICS_URL ??
   "http://localhost:8080";
 
+const CLUSTER_URLS: Record<string, string> = {};
+for (const [key, value] of Object.entries(process.env)) {
+  const match = key.match(/^PROMETHEUS_URL_(.+)$/);
+  if (match && value) {
+    CLUSTER_URLS[match[1].toLowerCase()] = value;
+  }
+}
+if (Object.keys(CLUSTER_URLS).length === 0) {
+  CLUSTER_URLS["default"] = PROMETHEUS_URL;
+}
+
 const ALLOWED_WINDOWS = new Set(["1h", "7d", "30d"]);
 
 function parseMetricValue(metricsText: string, name: string): number | null {
@@ -62,6 +73,71 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
+}
+
+function clusterPromProxy(): Plugin {
+  return {
+    name: "cluster-prom-proxy",
+    configureServer(server) {
+      server.middlewares.use(
+        async (req: IncomingMessage, res: ServerResponse, next) => {
+          if (req.url?.startsWith("/api/v1/clusters")) {
+            const honorLabelsEnv = (
+              process.env.HONOR_LABELS_CLUSTERS ?? ""
+            ).toLowerCase();
+            const honorSet = new Set(
+              honorLabelsEnv
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean),
+            );
+            const clusters = Object.keys(CLUSTER_URLS).map((name) => ({
+              name,
+              honor_labels: honorSet.has(name),
+            }));
+            sendJson(res, 200, clusters);
+            return;
+          }
+
+          const promMatch = req.url?.match(
+            /^\/prom\/([^/?]+)(\/[^?]*)?(\?.*)?$/,
+          );
+          if (!promMatch) {
+            next();
+            return;
+          }
+
+          const cluster = promMatch[1];
+          const clusterUrl = CLUSTER_URLS[cluster];
+          if (!clusterUrl) {
+            sendJson(res, 404, {
+              status: "error",
+              error: `unknown cluster: ${cluster}`,
+            });
+            return;
+          }
+
+          const rest = (promMatch[2] ?? "") + (promMatch[3] ?? "");
+          const target = `${clusterUrl.replace(/\/$/, "")}${rest}`;
+
+          try {
+            const upstream = await fetch(target);
+            res.statusCode = upstream.status;
+            const ct = upstream.headers.get("content-type");
+            if (ct) {
+              res.setHeader("Content-Type", ct);
+            }
+            const body = await upstream.text();
+            res.end(body);
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : "Prometheus proxy failed";
+            sendJson(res, 502, { status: "error", error: message });
+          }
+        },
+      );
+    },
+  };
 }
 
 function kermitDevApi(): Plugin {
@@ -148,7 +224,7 @@ function kermitDevApi(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), kermitDevApi()],
+  plugins: [react(), clusterPromProxy(), kermitDevApi()],
   base: "/",
   build: {
     outDir: "dist",
@@ -162,14 +238,12 @@ export default defineConfig({
           if (req.url?.startsWith("/api/v1/stats")) {
             return req.url;
           }
+          if (req.url?.startsWith("/api/v1/clusters")) {
+            return req.url;
+          }
         },
       },
       "/metrics": GPU_PRUNER_URL,
-      "/prom": {
-        target: PROMETHEUS_URL,
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/prom/, ""),
-      },
     },
   },
 });

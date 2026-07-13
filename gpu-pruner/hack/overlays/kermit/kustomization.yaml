@@ -1,0 +1,19 @@
+# Kermit cluster overlay — namespace-scoped resources only (no Namespace,
+# ClusterRole, or ClusterRoleBinding since those require cluster-admin).
+#
+# Prerequisites: the gpu-pruner-system namespace, ClusterRole, and bindings
+# must already exist in the kermit cluster.
+#
+# Apply with:
+#   kubectl kustomize --load-restrictor LoadRestrictionsNone gpu-pruner/hack/overlays/kermit/ \
+#     | kubectl --context kermit_US-EAST-01A apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment-patch.yaml
+  - ../../serviceaccount.yaml
+  - ../../service.yaml
+  - ../../dashboard-service-lb.yaml
+  - ../../slack-interactions-service-lb.yaml
+  - ../../servicemonitor.yaml

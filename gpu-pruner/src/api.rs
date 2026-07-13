@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Json,
-    extract::{Query, State},
-    http::StatusCode,
+    body::Body,
+    extract::{OriginalUri, Path, Query, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use prometheus_http_query::{Client as PromClient, response::Data};
@@ -14,9 +15,18 @@ use crate::metrics;
 const ALLOWED_WINDOWS: &[&str] = &["1h", "7d", "30d"];
 
 #[derive(Clone)]
+pub struct ClusterConfig {
+    pub http_client: reqwest::Client,
+    pub prometheus_url: String,
+    pub honor_labels: bool,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub prom_client: Arc<PromClient>,
-    pub honor_labels: bool,
+    pub http_client: reqwest::Client,
+    pub prometheus_url: String,
+    pub clusters: HashMap<String, ClusterConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -162,108 +172,98 @@ pub async fn stats_handler(
     }))
 }
 
-const IDLE_GPU_HOURS_LIMIT: usize = 25;
-const EXCLUDED_NAMESPACES: &str = "llm-d-nightly-.*|bench-guide-.*|cw-.*";
-const EXCLUDED_PODS: &str = "dcgm-exporter-.*";
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IdleGpuHoursEntry {
-    pub rank: usize,
-    pub namespace: String,
-    pub pod: String,
-    pub idle_hours: f64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IdleGpuHoursResponse {
-    pub entries: Vec<IdleGpuHoursEntry>,
-    pub prometheus_available: bool,
-    pub updated_at: String,
-}
-
-fn idle_gpu_hours_query(honor_labels: bool) -> String {
-    let (ns_label, pod_label) = if honor_labels {
-        ("namespace", "pod")
-    } else {
-        ("exported_namespace", "exported_pod")
-    };
-
-    format!(
-        "sort_desc(sum by ({ns_label}, {pod_label}) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{{{ns_label}!~\"{EXCLUDED_NAMESPACES}\",{pod_label}!=\"\",{pod_label}!~\"{EXCLUDED_PODS}\"}} < 0.01)[7d:1m]) / 60))"
-    )
-}
-
-fn parse_idle_gpu_hours(data: &Data, honor_labels: bool) -> Vec<IdleGpuHoursEntry> {
-    let (ns_key, pod_key) = if honor_labels {
-        ("namespace", "pod")
-    } else {
-        ("exported_namespace", "exported_pod")
-    };
-
-    let Data::Vector(samples) = data else {
-        return Vec::new();
-    };
-
-    let mut entries = Vec::new();
-    for sample in samples {
-        if entries.len() >= IDLE_GPU_HOURS_LIMIT {
-            break;
+async fn proxy_to_prometheus(http_client: &reqwest::Client, target: &str) -> Response {
+    match http_client.get(target).send().await {
+        Ok(upstream) => {
+            let status =
+                StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let content_type = upstream.headers().get(header::CONTENT_TYPE).cloned();
+            match upstream.bytes().await {
+                Ok(bytes) => {
+                    let mut builder = Response::builder().status(status);
+                    if let Some(ct) = content_type {
+                        builder = builder.header(header::CONTENT_TYPE, ct);
+                    }
+                    builder.body(Body::from(bytes)).unwrap_or_else(|e| {
+                        tracing::error!("Failed to build Prometheus proxy response: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read Prometheus proxy body: {e}");
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "status": "error",
+                            "error": "failed to read Prometheus response",
+                        })),
+                    )
+                        .into_response()
+                }
+            }
         }
-
-        let metric = sample.metric();
-        let namespace = metric
-            .get(ns_key)
-            .or_else(|| metric.get("namespace"))
-            .or_else(|| metric.get("exported_namespace"))
-            .cloned();
-        let pod = metric
-            .get(pod_key)
-            .or_else(|| metric.get("pod"))
-            .or_else(|| metric.get("exported_pod"))
-            .cloned();
-
-        let (Some(namespace), Some(pod)) = (namespace, pod) else {
-            continue;
-        };
-        if namespace.is_empty() || pod.is_empty() {
-            continue;
-        }
-
-        let idle_hours = sample.sample().value();
-        if !idle_hours.is_finite() {
-            continue;
-        }
-
-        entries.push(IdleGpuHoursEntry {
-            rank: entries.len() + 1,
-            namespace,
-            pod,
-            idle_hours,
-        });
-    }
-
-    entries
-}
-
-pub async fn idle_gpu_hours_handler(State(state): State<AppState>) -> Json<IdleGpuHoursResponse> {
-    let updated_at = now_rfc3339();
-    let query = idle_gpu_hours_query(state.honor_labels);
-
-    match state.prom_client.query(query).get().await {
-        Ok(response) => Json(IdleGpuHoursResponse {
-            entries: parse_idle_gpu_hours(response.data(), state.honor_labels),
-            prometheus_available: true,
-            updated_at,
-        }),
         Err(e) => {
-            tracing::warn!("Failed to query Prometheus for idle GPU hours: {e}");
-            Json(IdleGpuHoursResponse {
-                entries: Vec::new(),
-                prometheus_available: false,
-                updated_at,
-            })
+            tracing::warn!("Prometheus proxy request failed: {e}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": "failed to reach Prometheus",
+                })),
+            )
+                .into_response()
         }
     }
+}
+
+/// Proxy `/prom/{cluster}/*` to the named cluster's Prometheus URL.
+pub async fn prom_cluster_proxy_handler(
+    State(state): State<AppState>,
+    Path(cluster): Path<String>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    let config = match state.clusters.get(&cluster) {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("unknown cluster: {cluster}"),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let prefix = format!("/prom/{cluster}");
+    let stripped = path_and_query.strip_prefix(&prefix).unwrap_or("/");
+    let target = format!(
+        "{}{}",
+        config.prometheus_url.trim_end_matches('/'),
+        if stripped.is_empty() { "/" } else { stripped }
+    );
+    proxy_to_prometheus(&config.http_client, &target).await
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClusterInfo {
+    pub name: String,
+    pub honor_labels: bool,
+}
+
+pub async fn clusters_handler(State(state): State<AppState>) -> Json<Vec<ClusterInfo>> {
+    let mut clusters: Vec<ClusterInfo> = state
+        .clusters
+        .iter()
+        .map(|(name, config)| ClusterInfo {
+            name: name.clone(),
+            honor_labels: config.honor_labels,
+        })
+        .collect();
+    clusters.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(clusters)
 }
 
 pub fn web_dist_dir() -> std::path::PathBuf {
