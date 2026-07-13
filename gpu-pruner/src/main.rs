@@ -762,7 +762,7 @@ async fn main() -> anyhow::Result<()> {
                 .route("/api/v1/clusters", get(api::clusters_handler))
                 .route(
                     "/prom/{cluster}/{*rest}",
-                    get(api::prom_cluster_proxy_handler),
+                    get(api::prom_cluster_proxy_handler_rest),
                 )
                 .route("/prom/{cluster}", get(api::prom_cluster_proxy_handler))
                 .fallback_service(serve_dir)
