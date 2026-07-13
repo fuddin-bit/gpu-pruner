@@ -740,10 +740,9 @@ async fn main() -> anyhow::Result<()> {
             }
             let serve_dir = ServeDir::new(&web_dist).not_found_service(ServeFile::new(index_path));
 
-            let namespace = std::fs::read_to_string(
-                "/var/run/secrets/kubernetes.io/serviceaccount/namespace",
-            )
-            .unwrap_or_else(|_| "gpu-pruner-system".to_string());
+            let namespace =
+                std::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+                    .unwrap_or_else(|_| "gpu-pruner-system".to_string());
 
             let pod_name = std::env::var("HOSTNAME").unwrap_or_default();
 
