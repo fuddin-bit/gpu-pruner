@@ -14,7 +14,7 @@ use {
 };
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Debug,
     sync::{Arc, atomic::AtomicUsize},
 };
@@ -171,6 +171,20 @@ struct Cli {
     /// Supports exact namespace matching and prefix matching (e.g., "alice-" matches alice-dev, alice-prod).
     #[clap(long)]
     slack_namespace_mentions: Option<String>,
+
+    /// Dashboard cluster Prometheus endpoints in the form name=url.
+    /// Can be specified multiple times for multi-cluster dashboard support.
+    /// If omitted, the --prometheus-url is used as the sole "default" cluster.
+    /// Example: --cluster waldorf=http://prometheus-waldorf:9090 --cluster kermit=http://prometheus-kermit:9091
+    #[clap(long)]
+    cluster: Vec<String>,
+
+    /// Comma-separated list of cluster names that use honorLabels in their Prometheus ServiceMonitor.
+    /// Controls which label names (namespace/pod vs exported_namespace/exported_pod) the dashboard
+    /// reports for each cluster.
+    /// Example: --honor-labels-clusters waldorf
+    #[clap(long)]
+    honor_labels_clusters: Option<String>,
 }
 
 #[derive(Debug, Clone, ValueEnum, Default, Serialize)]
@@ -594,6 +608,12 @@ async fn main() -> anyhow::Result<()> {
     let (prom_client, http_client) = build_prom_client(&args).await;
     let prom_client = Arc::new(prom_client);
 
+    let clusters = build_cluster_configs(&args, &http_client).await;
+    tracing::info!(
+        "Dashboard clusters: {:?}",
+        clusters.keys().collect::<Vec<_>>()
+    );
+
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ScaleKind>(100);
 
     let query_task = {
@@ -706,6 +726,7 @@ async fn main() -> anyhow::Result<()> {
     let metrics_task = {
         let prom_client = prom_client.clone();
         let prometheus_url = args.prometheus_url.clone();
+        let clusters = clusters;
         tokio::spawn(async move {
             let web_dist = api::web_dist_dir();
             let index_path = web_dist.join("index.html");
@@ -723,6 +744,7 @@ async fn main() -> anyhow::Result<()> {
                 prom_client,
                 http_client,
                 prometheus_url,
+                clusters,
             };
 
             let app = Router::new()
@@ -737,8 +759,12 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .route("/api/v1/summary", get(api::summary_handler))
                 .route("/api/v1/stats", get(api::stats_handler))
-                .route("/prom/{*rest}", get(api::prom_proxy_handler))
-                .route("/prom", get(api::prom_proxy_handler))
+                .route("/api/v1/clusters", get(api::clusters_handler))
+                .route(
+                    "/prom/{cluster}/{*rest}",
+                    get(api::prom_cluster_proxy_handler),
+                )
+                .route("/prom/{cluster}", get(api::prom_cluster_proxy_handler))
                 .fallback_service(serve_dir)
                 .layer(
                     CorsLayer::new()
@@ -819,6 +845,59 @@ async fn build_prom_client(args: &Cli) -> (Client, reqwest::Client) {
         args.prometheus_tls_cert.clone(),
     )
     .expect("failed to build prometheus client")
+}
+
+async fn build_cluster_configs(
+    args: &Cli,
+    default_http_client: &reqwest::Client,
+) -> HashMap<String, api::ClusterConfig> {
+    let honor_labels_set: HashSet<String> = args
+        .honor_labels_clusters
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    if args.cluster.is_empty() {
+        let mut clusters = HashMap::new();
+        clusters.insert(
+            "default".to_string(),
+            api::ClusterConfig {
+                http_client: default_http_client.clone(),
+                prometheus_url: args.prometheus_url.clone(),
+                honor_labels: args.honor_labels,
+            },
+        );
+        return clusters;
+    }
+
+    let mut clusters = HashMap::new();
+    for entry in &args.cluster {
+        let (name, url) = entry
+            .split_once('=')
+            .unwrap_or_else(|| panic!("invalid --cluster format: {entry}, expected name=url"));
+        let token = get_prometheus_token()
+            .await
+            .expect("failed to get prometheus token for cluster");
+        let (_, cluster_http_client) = get_prom_client(
+            url,
+            token,
+            args.prometheus_tls_mode,
+            args.prometheus_tls_cert.clone(),
+        )
+        .unwrap_or_else(|e| panic!("failed to build prometheus client for cluster {name}: {e}"));
+        clusters.insert(
+            name.to_string(),
+            api::ClusterConfig {
+                http_client: cluster_http_client,
+                prometheus_url: url.to_string(),
+                honor_labels: honor_labels_set.contains(name),
+            },
+        );
+    }
+    clusters
 }
 
 #[tracing::instrument(skip_all)]

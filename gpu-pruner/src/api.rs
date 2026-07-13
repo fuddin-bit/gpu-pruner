@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Json,
     body::Body,
-    extract::{OriginalUri, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -15,10 +15,18 @@ use crate::metrics;
 const ALLOWED_WINDOWS: &[&str] = &["1h", "7d", "30d"];
 
 #[derive(Clone)]
+pub struct ClusterConfig {
+    pub http_client: reqwest::Client,
+    pub prometheus_url: String,
+    pub honor_labels: bool,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub prom_client: Arc<PromClient>,
     pub http_client: reqwest::Client,
     pub prometheus_url: String,
+    pub clusters: HashMap<String, ClusterConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -164,26 +172,8 @@ pub async fn stats_handler(
     }))
 }
 
-/// Proxy `/prom/*` to the configured Prometheus URL (strips the `/prom` prefix).
-/// Used by the dashboard idle-GPU leaderboard so the browser never talks to Prometheus directly.
-pub async fn prom_proxy_handler(
-    State(state): State<AppState>,
-    OriginalUri(uri): OriginalUri,
-) -> Response {
-    let path_and_query = uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/prom");
-    let stripped = path_and_query
-        .strip_prefix("/prom")
-        .unwrap_or(path_and_query);
-    let target = format!(
-        "{}{}",
-        state.prometheus_url.trim_end_matches('/'),
-        if stripped.is_empty() { "/" } else { stripped }
-    );
-
-    match state.http_client.get(&target).send().await {
+async fn proxy_to_prometheus(http_client: &reqwest::Client, target: &str) -> Response {
+    match http_client.get(target).send().await {
         Ok(upstream) => {
             let status =
                 StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -224,6 +214,56 @@ pub async fn prom_proxy_handler(
                 .into_response()
         }
     }
+}
+
+/// Proxy `/prom/{cluster}/*` to the named cluster's Prometheus URL.
+pub async fn prom_cluster_proxy_handler(
+    State(state): State<AppState>,
+    Path(cluster): Path<String>,
+    OriginalUri(uri): OriginalUri,
+) -> Response {
+    let config = match state.clusters.get(&cluster) {
+        Some(c) => c,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("unknown cluster: {cluster}"),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let prefix = format!("/prom/{cluster}");
+    let stripped = path_and_query.strip_prefix(&prefix).unwrap_or("/");
+    let target = format!(
+        "{}{}",
+        config.prometheus_url.trim_end_matches('/'),
+        if stripped.is_empty() { "/" } else { stripped }
+    );
+    proxy_to_prometheus(&config.http_client, &target).await
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClusterInfo {
+    pub name: String,
+    pub honor_labels: bool,
+}
+
+pub async fn clusters_handler(State(state): State<AppState>) -> Json<Vec<ClusterInfo>> {
+    let mut clusters: Vec<ClusterInfo> = state
+        .clusters
+        .iter()
+        .map(|(name, config)| ClusterInfo {
+            name: name.clone(),
+            honor_labels: config.honor_labels,
+        })
+        .collect();
+    clusters.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(clusters)
 }
 
 pub fn web_dist_dir() -> std::path::PathBuf {
