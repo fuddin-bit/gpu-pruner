@@ -8,3 +8,5 @@ resources:
 - dashboard-service-lb.yaml
 - slack-interactions-service-lb.yaml
 - servicemonitor.yaml
+- weekly-report-script-configmap.yaml
+- weekly-report-cronjob.yaml

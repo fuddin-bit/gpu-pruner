@@ -1,0 +1,68 @@
+# ConfigMap is generated from weekly-report.sh via kustomization.yaml
+# (configMapGenerator → gpu-pruner-weekly-report).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gpu-pruner-weekly-report
+  namespace: gpu-pruner-system
+  labels:
+    app: gpu-pruner
+    component: weekly-report
+spec:
+  schedule: "0 17 * * 5"
+  timeZone: America/New_York
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: gpu-pruner
+            component: weekly-report
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: weekly-report
+              image: alpine:3.20
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  apk add --no-cache curl jq >/dev/null
+                  exec /bin/sh /scripts/weekly-report.sh
+              env:
+                - name: DASHBOARD_URL
+                  value: http://gpu-pruner-dashboard:8080
+                - name: DASHBOARD_PUBLIC_URL
+                  value: http://166.19.50.111:8080
+                - name: SLACK_CHANNEL
+                  value: "#test-pruner"
+                - name: TOP_N
+                  value: "10"
+                - name: SLACK_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: gpu-pruner-slack-webhook
+                      key: webhook-url
+                      optional: false
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 200m
+                  memory: 128Mi
+          volumes:
+            - name: scripts
+              configMap:
+                name: gpu-pruner-weekly-report
+                defaultMode: 0555

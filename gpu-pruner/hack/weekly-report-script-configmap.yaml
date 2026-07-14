@@ -1,0 +1,159 @@
+# Source of truth for the script body: weekly-report.sh (keep in sync when editing).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-pruner-weekly-report
+  namespace: gpu-pruner-system
+  labels:
+    app: gpu-pruner
+    component: weekly-report
+data:
+  weekly-report.sh: |
+    #!/bin/sh
+    # Weekly GPU Pruner Slack digest.
+    # Fetches stats from the in-cluster dashboard API and posts to Slack.
+    set -eu
+    
+    DASHBOARD_URL="${DASHBOARD_URL:-http://gpu-pruner-dashboard:8080}"
+    SLACK_CHANNEL="${SLACK_CHANNEL:-#test-pruner}"
+    DASHBOARD_PUBLIC_URL="${DASHBOARD_PUBLIC_URL:-http://166.19.50.111:8080}"
+    TOP_N="${TOP_N:-10}"
+    
+    IDLE_QUERY_EXPORTED='sort_desc(sum by (exported_namespace, exported_pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{exported_pod!="",exported_pod!~"dcgm-exporter-.*"} < 0.01)[7d:1m]) / 60))'
+    IDLE_QUERY_HONOR='sort_desc(sum by (namespace, pod) (count_over_time((DCGM_FI_PROF_GR_ENGINE_ACTIVE{pod!="",pod!~"dcgm-exporter-.*"} < 0.01)[7d:1m]) / 60))'
+    
+    if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+      echo "SLACK_WEBHOOK_URL is required" >&2
+      exit 1
+    fi
+    
+    DASHBOARD_URL="${DASHBOARD_URL%/}"
+    
+    echo "Fetching stats from ${DASHBOARD_URL}..."
+    STATS_JSON="$(curl -sfS --max-time 60 "${DASHBOARD_URL}/api/v1/stats?window=7d")" || {
+      echo "Failed to fetch /api/v1/stats" >&2
+      exit 1
+    }
+    
+    SCALE_DOWNS="$(echo "${STATS_JSON}" | jq -r '
+      if (.scale_downs.in_window != null) then .scale_downs.in_window
+      else .scale_downs.lifetime end
+    ')"
+    IDLE_CURRENT="$(echo "${STATS_JSON}" | jq -r '.idle_workloads.current')"
+    PODS_CHECKED="$(echo "${STATS_JSON}" | jq -r '.pods_checked')"
+    PROM_AVAILABLE="$(echo "${STATS_JSON}" | jq -r '.prometheus_available')"
+    
+    LEADERBOARD_NOTE=""
+    ENTRIES_FILE="$(mktemp)"
+    trap 'rm -f "${ENTRIES_FILE}"' EXIT
+    
+    if CLUSTERS_JSON="$(curl -sfS --max-time 30 "${DASHBOARD_URL}/api/v1/clusters")"; then
+      cluster_count="$(echo "${CLUSTERS_JSON}" | jq 'length')"
+      i=0
+      while [ "${i}" -lt "${cluster_count}" ]; do
+        cluster="$(echo "${CLUSTERS_JSON}" | jq -c --argjson i "${i}" '.[$i]')"
+        name="$(echo "${cluster}" | jq -r '.name')"
+        honor="$(echo "${cluster}" | jq -r '.honor_labels')"
+        if [ "${honor}" = "true" ]; then
+          query="${IDLE_QUERY_HONOR}"
+        else
+          query="${IDLE_QUERY_EXPORTED}"
+        fi
+    
+        encoded_query="$(printf '%s' "${query}" | jq -sRr @uri)"
+        url="${DASHBOARD_URL}/prom/${name}/api/v1/query?query=${encoded_query}"
+    
+        if body="$(curl -sfS --max-time 120 "${url}")"; then
+          echo "${body}" | jq -c --arg cluster "${name}" '
+            if .status != "success" then empty else
+              (.data.result // [])[]
+              | {
+                  cluster: $cluster,
+                  namespace: (.metric.namespace // .metric.exported_namespace // empty),
+                  pod: (.metric.pod // .metric.exported_pod // empty),
+                  idle_hours: ((.value[1] // "0") | tonumber)
+                }
+              | select(.namespace != "" and .pod != "" and (.idle_hours | isfinite))
+            end
+          ' >>"${ENTRIES_FILE}" || true
+        else
+          echo "Warning: idle-hours query failed for cluster ${name}" >&2
+        fi
+    
+        i=$((i + 1))
+      done
+    else
+      echo "Warning: failed to fetch /api/v1/clusters; sending stats-only report" >&2
+      LEADERBOARD_NOTE=" (leaderboard unavailable)"
+    fi
+    
+    if [ -s "${ENTRIES_FILE}" ]; then
+      LEADERBOARD_TEXT="$(
+        jq -s -r --argjson topn "${TOP_N}" '
+          sort_by(-.idle_hours)
+          | .[0:$topn]
+          | to_entries
+          | map("\(.key + 1). `\(.value.cluster)`/\(.value.namespace)/\(.value.pod) — \(.value.idle_hours | . * 10 | round / 10)h")
+          | join("\n")
+        ' "${ENTRIES_FILE}"
+      )"
+      if [ -z "${LEADERBOARD_TEXT}" ]; then
+        LEADERBOARD_TEXT="_No idle GPU hours reported._"
+      fi
+    else
+      LEADERBOARD_TEXT="_No idle GPU hours reported.${LEADERBOARD_NOTE}_"
+    fi
+    
+    SCALE_SUBTITLE="Last 7 days"
+    if [ "${PROM_AVAILABLE}" != "true" ]; then
+      SCALE_SUBTITLE="Lifetime (Prometheus window unavailable)"
+    fi
+    
+    TS="$(date +%s)"
+    
+    PAYLOAD="$(jq -n \
+      --arg channel "${SLACK_CHANNEL}" \
+      --arg scale_downs "${SCALE_DOWNS}" \
+      --arg scale_subtitle "${SCALE_SUBTITLE}" \
+      --arg idle_current "${IDLE_CURRENT}" \
+      --arg pods_checked "${PODS_CHECKED}" \
+      --arg leaderboard "${LEADERBOARD_TEXT}" \
+      --arg dashboard_url "${DASHBOARD_PUBLIC_URL}" \
+      --argjson ts "${TS}" \
+      '{
+        channel: $channel,
+        text: ("GPU Pruner weekly report — <" + $dashboard_url + "|Open dashboard>"),
+        attachments: [{
+          color: "#0066cc",
+          title: "GPU Pruner — Weekly Report (last 7 days)",
+          title_link: $dashboard_url,
+          fields: [
+            { title: "Scale-downs", value: ($scale_downs + "\n" + $scale_subtitle), short: true },
+            { title: "Idle workloads (now)", value: $idle_current, short: true },
+            { title: "Pods checked (last cycle)", value: $pods_checked, short: true },
+            { title: "Top idle GPU hours", value: $leaderboard, short: false },
+            { title: "Dashboard", value: ("<" + $dashboard_url + "|" + $dashboard_url + ">"), short: false }
+          ],
+          footer: "gpu-pruner weekly report",
+          ts: $ts
+        }]
+      }'
+    )"
+    
+    echo "Posting weekly report to Slack channel ${SLACK_CHANNEL}..."
+    HTTP_CODE="$(curl -sS -o /tmp/slack-response.txt -w "%{http_code}" \
+      --max-time 30 \
+      -X POST \
+      -H "Content-Type: application/json" \
+      -d "${PAYLOAD}" \
+      "${SLACK_WEBHOOK_URL}")" || {
+      echo "Failed to POST to Slack webhook" >&2
+      exit 1
+    }
+    
+    if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+      echo "Slack webhook returned HTTP ${HTTP_CODE}: $(cat /tmp/slack-response.txt)" >&2
+      exit 1
+    fi
+    
+    echo "Weekly report sent successfully (HTTP ${HTTP_CODE})."

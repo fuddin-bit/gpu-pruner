@@ -161,6 +161,38 @@ Enable the dashboard by passing `--dashboard-port`:
 gpu-pruner --dashboard-port=8080 -d --prometheus-url=...
 ```
 
+### Weekly Slack report
+
+A Kubernetes CronJob posts a Friday 5:00 PM (America/New_York) digest to Slack by curling the live dashboard APIs (no changes to the Rust binary).
+
+Manifests live under [`gpu-pruner/hack/`](gpu-pruner/hack/):
+
+- [`weekly-report.sh`](gpu-pruner/hack/weekly-report.sh) — fetches `/api/v1/stats?window=7d`, `/api/v1/clusters`, and idle GPU hours via `/prom/{cluster}/...`, then POSTs to the Slack webhook
+- [`weekly-report-script-configmap.yaml`](gpu-pruner/hack/weekly-report-script-configmap.yaml) — ConfigMap embedding the script
+- [`weekly-report-cronjob.yaml`](gpu-pruner/hack/weekly-report-cronjob.yaml) — CronJob (`0 17 * * 5`, `timeZone: America/New_York`)
+
+**Requirements**
+
+- Dashboard Service reachable in-cluster as `http://gpu-pruner-dashboard:8080`
+- Secret `gpu-pruner-slack-webhook` with key `webhook-url` (same as the Deployment)
+- Slack messages link to the public dashboard at `http://166.19.50.111:8080` (`DASHBOARD_PUBLIC_URL`)
+
+**Apply with the rest of the hack manifests**
+
+```bash
+kubectl apply -k gpu-pruner/hack/
+```
+
+**Trigger a one-off run for testing**
+
+```bash
+kubectl create job --from=cronjob/gpu-pruner-weekly-report gpu-pruner-weekly-report-manual \
+  -n gpu-pruner-system
+kubectl logs -n gpu-pruner-system -l job-name=gpu-pruner-weekly-report-manual -f
+```
+
+Env vars on the CronJob: `DASHBOARD_URL`, `DASHBOARD_PUBLIC_URL`, `SLACK_CHANNEL`, `TOP_N`, `SLACK_WEBHOOK_URL`.
+
 ### Grafana Dashboard
 
 Import `gpu-dashboard.json` into Grafana for advanced analytics and visualization. The dashboard **auto-refreshes every 30 seconds**.
