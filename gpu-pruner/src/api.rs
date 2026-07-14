@@ -153,7 +153,14 @@ pub async fn stats_handler(
     let mut in_window = None;
     let mut prometheus_available = false;
 
-    match query_scale_downs_in_window(&state.prom_client, &window, &state.namespace, &state.pod_name).await {
+    match query_scale_downs_in_window(
+        &state.prom_client,
+        &window,
+        &state.namespace,
+        &state.pod_name,
+    )
+    .await
+    {
         Ok(count) => {
             in_window = Some(count);
             prometheus_available = true;

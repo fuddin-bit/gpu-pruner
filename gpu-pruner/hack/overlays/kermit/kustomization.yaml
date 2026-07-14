@@ -17,3 +17,4 @@ resources:
   - ../../dashboard-service-lb.yaml
   - ../../slack-interactions-service-lb.yaml
   - ../../servicemonitor.yaml
+  - ../../namespace-mentions-secret.yaml
