@@ -1,8 +1,8 @@
 # gpu-pruner
 
-The `gpu-pruner` is a non-destructive idle culler that works with Red Hat OpenShift AI/Kubeflow provided APIs (`InferenceService` and `Notebook`), as well as generic `Deployment`, `ReplicaSet` and `StatefulSet`.
+The `gpu-pruner` is a non-destructive idle culler that works with Red Hat OpenShift AI/Kubeflow provided APIs (`InferenceService` and `Notebook`), as well as generic `Deployment`, `ReplicaSet`, `StatefulSet`, and `LeaderWorkerSet`.
 
-The way it works is by querying cluster NVIDIA DCGM metrics and looking at a window of GPU utilization per pod. A scaling decision is made by looking up the pods metadata, and using owner-references to figure out the owning resource.
+The way it works is by querying cluster NVIDIA DCGM metrics and looking at a window of GPU utilization per pod. A scaling decision is made by looking up the pods metadata, and using owner-references to figure out the owning resource. `LeaderWorkerSet` is always enabled when any other resource types are selected.
 
 **Note:** Requires a K8s service account with CRUD access to the resources in the namespaces that you want to prune.
 
@@ -10,7 +10,59 @@ An [example set of k8s deployment manifests](./gpu-pruner/hack/kustomization.yam
 
 [prebuilt images](https://github.com/wseaton/gpu-pruner/pkgs/container/gpu-pruner) based on the Dockerfiles in the repository are published to ghcr.io.
 
+## Getting Started
 
+### Prerequisites
+
+- A Kubernetes/OpenShift cluster with NVIDIA DCGM exporter metrics in Prometheus
+- `kubectl` access and a ServiceAccount with CRUD on the workload types you want to prune
+- Network reachability from the pruner pod to your Prometheus endpoint
+
+### 1. Point at your Prometheus
+
+Edit [`gpu-pruner/hack/deployment.yaml`](gpu-pruner/hack/deployment.yaml) and set `--prometheus-url` (and optional `--cluster` entries) to your Prometheus Service. Start in dry-run so nothing is scaled:
+
+```yaml
+args:
+  - 'gpu-pruner'
+  - '-d'
+  - '--run-mode=dry-run'
+  - '--prometheus-url=http://prometheus-k8s.openshift-monitoring.svc:9090'
+```
+
+If your Prometheus ServiceMonitor uses `honorLabels: true`, also pass `--honor-labels`.
+
+### 2. Deploy
+
+```bash
+kubectl apply -k gpu-pruner/hack/
+```
+
+This creates the `gpu-pruner-system` namespace, RBAC, Deployment, dashboard Service, and optional weekly Slack report CronJob.
+
+### 3. Verify
+
+```bash
+kubectl -n gpu-pruner-system logs -l app=gpu-pruner -f
+kubectl -n gpu-pruner-system port-forward svc/gpu-pruner-dashboard 8080:8080
+```
+
+Open `http://localhost:8080` for the web dashboard. Idle candidates should appear when GPUs stay under the idle threshold for the configured window (default 30 minutes).
+
+### 4. Enable scale-down
+
+When dry-run looks correct, switch `--run-mode=scale-down` in the Deployment and re-apply. Optionally wire Slack notifications (`SLACK_WEBHOOK_URL`) and acknowledgments so users can keep intentionally idle workloads alive — see [Acknowledgment System](#acknowledgment-system).
+
+### Run locally (optional)
+
+```bash
+cargo run -p gpu-pruner -- \
+  --prometheus-url=http://localhost:9090 \
+  --run-mode=dry-run \
+  -d
+```
+
+Use `kubectl port-forward` (or a similar tunnel) so Prometheus is reachable from your machine. The binary still needs kubeconfig credentials with permission to list/scale target resources.
 
 ## How It Works
 
@@ -155,10 +207,13 @@ Features:
 - Modern web UI with auto-refresh
 - REST API endpoint for programmatic access
 
-Enable the dashboard by passing `--dashboard-port`:
+The dashboard, REST API, and Prometheus `/metrics` endpoint are always served on port **8080**. For multi-cluster views, pass `--cluster name=url` one or more times (see usage below).
 
 ```sh
-gpu-pruner --dashboard-port=8080 -d --prometheus-url=...
+gpu-pruner -d --prometheus-url=http://prometheus:9090 \
+  --cluster waldorf=http://prometheus-waldorf:9090 \
+  --cluster kermit=http://prometheus-kermit:9091 \
+  --honor-labels-clusters=waldorf
 ```
 
 ### Weekly Slack report
@@ -244,11 +299,14 @@ Options:
           daemon mode to run in, if true, will run indefinitely
 
   -e, --enabled-resources <ENABLED_RESOURCES>
-          Specifcy enabled resources with a string of letters
+          Specify enabled resources with a string of letters
 
-          - `d` for Deployment - `r` for ReplicaSet - `s` for StatefulSet - `i` for InferenceService - `n` for Notebook
+          - `d` for Deployment - `r` for ReplicaSet - `s` for StatefulSet
+          - `i` for InferenceService - `n` for Notebook - `l` for LeaderWorkerSet
 
-          [default: drsin]
+          Note: LeaderWorkerSet is automatically enabled with any resource combination
+
+          [default: drsinl]
 
   -c, --check-interval <CHECK_INTERVAL>
           interval in seconds to check for idle pods, only used in daemon mode
@@ -257,7 +315,7 @@ Options:
 
   -n, --namespace <NAMESPACE>
           namespace to use for search filter, is passed down to prometheus as a pattern match
-          note: namespaces under bench-guide-* and llm-d-nightly-* are excluded from pruning
+          note: namespaces matching llm-d-nightly-*, bench-guide-*, and cw-* are excluded from pruning
 
   -g, --grace-period <GRACE_PERIOD>
           Seconds of grace period to allow for metrics to be published
@@ -266,6 +324,22 @@ Options:
 
   -m, --model-name <MODEL_NAME>
           model name of GPU to use for filter, eg. "NVIDIA A10G", is passed down to prometheus as a pattern match
+
+      --idle-threshold <IDLE_THRESHOLD>
+          Maximum combined GPU utilization (0.0–1.0) to still consider a GPU idle.
+          Defaults to 0.01 to tolerate DCGM background noise on DCGM_FI_PROF_GR_ENGINE_ACTIVE
+
+          [default: 0.01]
+
+      --power-threshold <POWER_THRESHOLD>
+          Power draw threshold in watts. When set, GPUs showing peak power usage above this
+          value over the lookback window are excluded from idle candidates even if compute
+          utilization is zero (e.g. 100 for A10G, 150 for A100/H100)
+
+      --honor-labels
+          Set when the Prometheus ServiceMonitor uses honorLabels: true.
+          Controls whether queries use native DCGM labels (pod/namespace/container) or
+          Prometheus-prefixed names (exported_pod/exported_namespace/exported_container)
 
   -r, --run-mode <RUN_MODE>
           Operation mode of the scaler process
@@ -279,14 +353,48 @@ Options:
       --prometheus-token <PROMETHEUS_TOKEN>
           Prometheus token to use for authentication, if not provided, will try to authenticate using the service token of the currently logged in K8s user
 
+      --prometheus-tls-mode <PROMETHEUS_TLS_MODE>
+          [default: verify]
+          [possible values: skip, verify]
+
+      --prometheus-tls-cert <PROMETHEUS_TLS_CERT>
+          Custom .crt file to use for TLS verification
+
   -l, --log-format <LOG_FORMAT>
           Log format to use
 
           [default: default]
           [possible values: json, default, pretty]
 
-      --dashboard-port <DASHBOARD_PORT>
-          Enable the web dashboard on the specified port
+      --slack-webhook-url <SLACK_WEBHOOK_URL>
+          Slack webhook URL for notifications. Can also be set via SLACK_WEBHOOK_URL env var
+
+      --slack-channel <SLACK_CHANNEL>
+          Slack channel to send notifications to
+
+          [default: #test-pruner]
+
+      --slack-interaction-port <SLACK_INTERACTION_PORT>
+          Port to listen for Slack interactive component callbacks (button clicks).
+          Required if you want users to acknowledge idle GPUs from Slack messages
+
+      --ack-grace-period <ACK_GRACE_PERIOD>
+          Seconds to wait after Slack notification before scaling down (Slack only)
+
+          [default: 300]
+
+      --slack-namespace-mentions <SLACK_NAMESPACE_MENTIONS>
+          Namespace-to-Slack-mention mapping as JSON. Can also be set via SLACK_NAMESPACE_MENTIONS.
+          Format: {"namespace": "<@USER_ID>", "prefix-": "<@USER_ID>"}
+
+      --cluster <CLUSTER>
+          Dashboard cluster Prometheus endpoints in the form name=url.
+          Can be specified multiple times for multi-cluster dashboard support.
+          If omitted, --prometheus-url is used as the sole "default" cluster
+
+      --honor-labels-clusters <HONOR_LABELS_CLUSTERS>
+          Comma-separated list of cluster names that use honorLabels in their
+          Prometheus ServiceMonitor (dashboard label naming)
 
   -h, --help
           Print help (see a summary with '-h')
